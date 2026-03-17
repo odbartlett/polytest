@@ -30,6 +30,7 @@ Lifecycle (both modes):
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
 from datetime import datetime, timezone
@@ -102,6 +103,7 @@ class WhaleBot:
         self._performance_tracker = None
         self._market_monitor = None
         self._order_executor = None  # live mode only
+        self._monitor_task: Optional[asyncio.Task[None]] = None
 
     async def run(self) -> None:
         """Main async entry point."""
@@ -182,6 +184,11 @@ class WhaleBot:
                     )
                 )
                 logger.info("bot.running", mode=mode, wallet_count=len(wallet_addresses))
+
+            # Start monitoring dashboard (FastAPI on PORT env var, default 8080)
+            monitor_port = int(os.getenv("PORT", "8080"))
+            self._monitor_task = asyncio.create_task(self._serve_monitor(monitor_port))
+            logger.info("monitor.started", port=monitor_port)
 
             # Block until shutdown signal
             await self._shutdown_event.wait()
@@ -425,11 +432,27 @@ class WhaleBot:
             risk_gate=self._risk_gate,
         )
 
+    async def _serve_monitor(self, port: int) -> None:
+        """Run the FastAPI monitoring dashboard in the background."""
+        import uvicorn
+        from monitor.api import app as monitor_app
+
+        config = uvicorn.Config(monitor_app, host="0.0.0.0", port=port, log_level="warning")
+        server = uvicorn.Server(config)
+        await server.serve()
+
     async def _shutdown(self) -> None:
         """Graceful shutdown: cancel tasks, close connections, flush logs."""
         logger.info("bot.shutdown.starting")
 
         self._shutdown_event.set()
+
+        if self._monitor_task and not self._monitor_task.done():
+            self._monitor_task.cancel()
+            try:
+                await asyncio.wait_for(self._monitor_task, timeout=3.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
 
         if self._ws_task and not self._ws_task.done():
             self._ws_task.cancel()

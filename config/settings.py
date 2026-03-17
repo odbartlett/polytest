@@ -122,6 +122,21 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     # Validators
     # -------------------------------------------------------------------------
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def normalize_db_url(cls, v: str) -> str:
+        """Convert postgres:// or postgresql:// → postgresql+asyncpg:// for asyncpg.
+
+        Railway (and many PaaS providers) supply the URL without the asyncpg
+        dialect prefix. This validator normalises both common variants so the
+        engine can always be created correctly regardless of how the URL is set.
+        """
+        if v.startswith("postgres://"):
+            return v.replace("postgres://", "postgresql+asyncpg://", 1)
+        if v.startswith("postgresql://") and "+asyncpg" not in v:
+            return v.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return v
+
     @field_validator("POLYMARKET_PRIVATE_KEY", mode="before")
     @classmethod
     def strip_hex_prefix(cls, v: Optional[str]) -> Optional[str]:

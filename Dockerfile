@@ -45,8 +45,11 @@ COPY --chown=botuser:botuser . .
 # Switch to non-root user
 USER botuser
 
-# Health check — the bot exposes no HTTP port; we check the process is alive
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD pgrep -f "python main.py" || exit 1
+# Monitoring dashboard port (overridden by PORT env var on Railway)
+EXPOSE 8080
+
+# Health check via the monitoring API
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8080}/api/status || exit 1
 
 ENTRYPOINT ["python", "main.py"]
