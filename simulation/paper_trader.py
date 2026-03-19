@@ -120,7 +120,7 @@ class PaperTrader:
           - Insufficient available cash
         """
         if not market.tokens:
-            return ExecutionResult(success=False, reason="No tokens for market")
+            return ExecutionResult(success=False, reason="No tokens for market", gate_failed="NO_MARKET_TOKENS")
 
         # Use the token the whale actually traded (from signal), not just tokens[0].
         # tokens[0] may be the opposite outcome (e.g. NO when whale bought YES),
@@ -139,6 +139,7 @@ class PaperTrader:
             return ExecutionResult(
                 success=False,
                 reason=f"Already have open position {existing.id} in this market",
+                gate_failed="DUPLICATE_POSITION",
             )
 
         # --- Guard 2: enough liquid cash ---
@@ -152,6 +153,7 @@ class PaperTrader:
             return ExecutionResult(
                 success=False,
                 reason=f"Insufficient cash: ${available:.2f} available, ${signal.copy_size_usdc:.2f} needed",
+                gate_failed="INSUFFICIENT_CASH",
             )
 
         # --- Compute simulated fill price from live orderbook ---
@@ -178,6 +180,7 @@ class PaperTrader:
             return ExecutionResult(
                 success=False,
                 reason=f"Price assertion failed: fill price {fill_price:.4f} outside [{self._settings.MIN_ENTRY_PRICE}, {self._settings.MAX_ENTRY_PRICE}]",
+                gate_failed="PRICE_ASSERTION_FAILED",
             )
 
         shares = signal.copy_size_usdc / fill_price

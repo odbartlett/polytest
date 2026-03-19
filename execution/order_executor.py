@@ -39,6 +39,7 @@ class ExecutionResult(BaseModel):
     position_id: Optional[int] = None
     fill_price: Optional[float] = None
     reason: str = ""
+    gate_failed: Optional[str] = None  # executor-level rejection label for funnel analytics
 
 
 class OrderExecutor:

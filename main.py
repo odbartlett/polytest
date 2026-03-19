@@ -238,12 +238,10 @@ class WhaleBot:
             assert self._signal_engine is not None
             signal = await self._signal_engine.evaluate(trade)
 
-            # 3. Log signal event to DB (funnel analytics — always)
-            asyncio.create_task(_persist_signal_event(trade, signal))
-
+            # 3. Gate rejection — log and exit early
             if not signal.should_trade:
+                asyncio.create_task(_persist_signal_event(trade, signal, exec_gate_failed=None))
                 logger.info("pipeline.signal_rejected", reason=signal.reason, gate=signal.gate_failed)
-                # Alert for non-trivial rejections (skip SELL noise)
                 if signal.gate_failed != "TRADE_IS_BUY" and self._alerter:
                     try:
                         await self._alerter.trade_skipped(
@@ -290,7 +288,16 @@ class WhaleBot:
                     copied_from_wallet=trade.wallet_address,
                 )
 
-            # 7. Persist the underlying trade record
+            # 7. Log signal event now that we know the actual execution outcome.
+            # gate_failed = None if position opened, executor's gate label if rejected.
+            asyncio.create_task(
+                _persist_signal_event(
+                    trade, signal,
+                    exec_gate_failed=None if exec_result.success else exec_result.gate_failed,
+                )
+            )
+
+            # 8. Persist the underlying trade record
             asyncio.create_task(
                 _persist_trade_record(trade, signal_generated=exec_result.success, skip_reason=None)
             )
@@ -515,9 +522,35 @@ async def _create_redis(url: str) -> aioredis.Redis:  # type: ignore[type-arg]
 async def _persist_signal_event(
     trade: TradeEvent,
     signal: SignalDecision,
+    exec_gate_failed: "str | None" = None,
 ) -> None:
-    """Log every signal evaluation to signal_events for funnel analytics."""
+    """Log every signal evaluation to signal_events for funnel analytics.
+
+    For signals that passed all gates (signal.should_trade=True), we call this
+    AFTER execution so we can record the actual outcome:
+      - exec_gate_failed=None  → position was opened → signal_result='EXECUTED'
+      - exec_gate_failed=str   → executor rejected it (e.g. PRICE_ASSERTION_FAILED,
+                                  DUPLICATE_POSITION) → signal_result='SKIPPED'
+                                  with that label as gate_failed
+    """
     from db.session import AsyncSessionLocal
+
+    # Determine the true gate and result after considering executor outcome
+    if not signal.should_trade:
+        # Failed a signal gate — use signal's own gate label
+        result = "SKIPPED"
+        gate = signal.gate_failed
+        reason = signal.reason
+    elif exec_gate_failed is not None:
+        # Passed all signal gates but executor rejected — show executor's gate
+        result = "SKIPPED"
+        gate = exec_gate_failed
+        reason = f"Executor rejected: {exec_gate_failed}"
+    else:
+        # Passed everything, position opened
+        result = "EXECUTED"
+        gate = None
+        reason = signal.reason
 
     try:
         async with AsyncSessionLocal() as session:
@@ -543,10 +576,10 @@ async def _persist_signal_event(
                         "score": signal.whale_score,
                         "tier": _score_tier(signal.whale_score),
                         "size": trade.size_usdc,
-                        "result": "EXECUTED" if signal.should_trade else "SKIPPED",
-                        "gate": signal.gate_failed,
-                        "reason": signal.reason,
-                        "copy_size": signal.copy_size_usdc if signal.should_trade else None,
+                        "result": result,
+                        "gate": gate,
+                        "reason": reason,
+                        "copy_size": signal.copy_size_usdc if result == "EXECUTED" else None,
                         "ts": datetime.now(tz=timezone.utc),
                     },
                 )
