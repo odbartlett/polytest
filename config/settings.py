@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     MIN_MARKET_OPEN_INTEREST: float = 150_000.0
     MIN_WHALE_TRADE_SIZE: float = 500.0
     MIN_COPY_SIZE: float = 50.0
-    MIN_HOURS_TO_RESOLUTION: int = 6
+    MIN_HOURS_TO_RESOLUTION: int = 1
     MAX_LIQUIDITY_CONSUMPTION_PCT: float = 0.20
     # Only copy trades where the token price implies real upside.
     # A token at $0.95 has $0.05 upside vs $0.95 downside — terrible odds.
