@@ -105,8 +105,8 @@ class Settings(BaseSettings):
     # A token at $0.95 has $0.05 upside vs $0.95 downside — terrible odds.
     # A token at $0.10 has $0.90 upside vs $0.10 downside — worthwhile.
     MIN_ENTRY_PRICE: float = 0.05   # below this = near-zero probability, skip
-    MAX_ENTRY_PRICE: float = 0.70   # above this = near-certain, no upside left
-    MAX_HOURS_TO_RESOLUTION: int = 336    # 14 days — ignore markets resolving > 14 days out
+    MAX_ENTRY_PRICE: float = 0.85   # above this = near-certain, no upside left
+    MAX_HOURS_TO_RESOLUTION: int = 2160   # 90 days — ignore markets resolving > 90 days out
     SIM_STOP_LOSS_PCT: float = 0.30       # auto-close position if unrealized loss > 30%
     SIM_TAKE_PROFIT_PCT: float = 0.50     # auto-close position if unrealized gain > 50%
 
