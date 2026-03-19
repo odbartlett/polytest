@@ -71,13 +71,35 @@ async def get_status() -> JSONResponse:
         circuit_breaker = "0"
 
     mode = "SIMULATION" if _settings.SIMULATION_MODE else "LIVE"
-    bankroll = float(sim_bankroll) if sim_bankroll else _settings.SIM_BANKROLL_USDC
-    peak = float(sim_peak) if sim_peak else bankroll
+    liquid = float(sim_bankroll) if sim_bankroll else _settings.SIM_BANKROLL_USDC
+    peak = float(sim_peak) if sim_peak else liquid
+
+    # Portfolio value = liquid cash + current mark-to-market value of open positions
+    # (deployed cost + unrealized pnl). Using liquid-only understates the true value.
+    try:
+        async with _SessionLocal() as session:
+            result = await session.execute(text("""
+                SELECT
+                    COALESCE(SUM(size_usdc), 0)          AS deployed,
+                    COALESCE(SUM(unrealized_pnl_usdc), 0) AS unrealized
+                FROM bot_positions
+                WHERE status = 'OPEN' AND is_simulated = TRUE
+            """))
+            r2 = result.mappings().one()
+            deployed = float(r2["deployed"])
+            unrealized = float(r2["unrealized"])
+    except Exception:
+        deployed = unrealized = 0.0
+
+    bankroll = liquid + deployed + unrealized   # true portfolio value
     drawdown_pct = ((peak - bankroll) / peak * 100) if peak > 0 else 0.0
 
     return JSONResponse({
         "mode": mode,
-        "bankroll": round(bankroll, 2),
+        "liquid_cash": round(liquid, 2),
+        "deployed_capital": round(deployed, 2),
+        "unrealized_pnl": round(unrealized, 2),
+        "bankroll": round(bankroll, 2),          # total portfolio value
         "peak_bankroll": round(peak, 2),
         "drawdown_pct": round(drawdown_pct, 2),
         "whitelist_count": whitelist_count or 0,

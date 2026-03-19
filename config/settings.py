@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     SLIPPAGE_TOLERANCE_LIQUID: float = 0.02
     SLIPPAGE_TOLERANCE_THIN: float = 0.01
     ORDER_FILL_TIMEOUT_SECONDS: int = 90
-    MIN_MARKET_OPEN_INTEREST: float = 50_000.0
+    MIN_MARKET_OPEN_INTEREST: float = 150_000.0
     MIN_WHALE_TRADE_SIZE: float = 500.0
     MIN_COPY_SIZE: float = 50.0
     MIN_HOURS_TO_RESOLUTION: int = 6
@@ -106,11 +106,14 @@ class Settings(BaseSettings):
     # A token at $0.10 has $0.90 upside vs $0.10 downside — worthwhile.
     MIN_ENTRY_PRICE: float = 0.05   # below this = near-zero probability, skip
     MAX_ENTRY_PRICE: float = 0.70   # above this = near-certain, no upside left
+    MAX_HOURS_TO_RESOLUTION: int = 2160   # 90 days — ignore markets resolving > 90 days out
+    SIM_STOP_LOSS_PCT: float = 0.30       # auto-close position if unrealized loss > 30%
+    SIM_TAKE_PROFIT_PCT: float = 0.50     # auto-close position if unrealized gain > 50%
 
     # -------------------------------------------------------------------------
     # Scoring thresholds
     # -------------------------------------------------------------------------
-    WHALE_SCORE_FLOOR: float = 55.0
+    WHALE_SCORE_FLOOR: float = 65.0
     WHALE_SCORE_REMOVAL: float = 45.0
     WHITELIST_MAX_SIZE: int = 75
     MIN_RESOLVED_MARKETS: int = 30

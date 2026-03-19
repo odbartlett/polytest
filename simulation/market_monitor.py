@@ -100,6 +100,16 @@ class MarketMonitor:
                     unrealized_pnl=round(unrealized_pnl, 2),
                 )
 
+                # Stop-loss / take-profit check
+                if pos.size_usdc > 0:
+                    pnl_pct = unrealized_pnl / pos.size_usdc
+                    stop_loss = -self._settings.SIM_STOP_LOSS_PCT
+                    take_profit = self._settings.SIM_TAKE_PROFIT_PCT
+                    if pnl_pct <= stop_loss:
+                        await self._force_close_position(pos, current_price, "STOP_LOSS")
+                    elif pnl_pct >= take_profit:
+                        await self._force_close_position(pos, current_price, "TAKE_PROFIT")
+
             except Exception as exc:
                 logger.warning(
                     "market_monitor.mark_failed",
@@ -282,3 +292,58 @@ class MarketMonitor:
             )
         except Exception as exc:
             logger.debug("market_monitor.close_alert_failed", error=str(exc))
+
+    async def _force_close_position(
+        self,
+        pos: BotPosition,
+        exit_price: float,
+        reason: str,
+    ) -> None:
+        """Close a position at the current market price (stop-loss or take-profit)."""
+        realized_pnl = (exit_price - pos.entry_price) * pos.shares_held
+        proceeds = exit_price * pos.shares_held
+        now = datetime.now(tz=timezone.utc)
+
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.execute(
+                    update(BotPosition)
+                    .where(BotPosition.id == pos.id)
+                    .values(
+                        status=PositionStatus.CLOSED,
+                        exit_price=exit_price,
+                        current_price=exit_price,
+                        unrealized_pnl_usdc=0.0,
+                        realized_pnl_usdc=realized_pnl,
+                        closed_at=now,
+                        exit_reason=reason,
+                    )
+                )
+
+        try:
+            await self._paper_trader.restore_bankroll(proceeds)  # type: ignore[attr-defined]
+        except Exception as exc:
+            logger.warning("market_monitor.stop_loss_bankroll_restore_failed", error=str(exc))
+
+        pnl_sign = "+" if realized_pnl >= 0 else ""
+        logger.info(
+            "market_monitor.position_force_closed",
+            position_id=pos.id,
+            market=pos.market_id,
+            reason=reason,
+            exit_price=round(exit_price, 4),
+            realized_pnl=f"{pnl_sign}{round(realized_pnl, 2)}",
+            pnl_pct=f"{pnl_sign}{round(realized_pnl / pos.size_usdc * 100, 1)}%",
+        )
+
+        try:
+            await self._alerter.sim_position_closed(  # type: ignore[attr-defined]
+                market=pos.market_question or pos.market_id,
+                pnl=realized_pnl,
+                exit_reason=reason,
+                entry_price=pos.entry_price,
+                exit_price=exit_price,
+                size=pos.size_usdc,
+            )
+        except Exception:
+            pass

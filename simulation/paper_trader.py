@@ -122,8 +122,11 @@ class PaperTrader:
         if not market.tokens:
             return ExecutionResult(success=False, reason="No tokens for market")
 
-        token = market.tokens[0]
-        token_id = token.token_id
+        # Use the token the whale actually traded (from signal), not just tokens[0].
+        # tokens[0] may be the opposite outcome (e.g. NO when whale bought YES),
+        # causing fills at ~$1.00 on near-resolved tokens.
+        token_id = signal.token_id if signal.token_id else market.tokens[0].token_id
+        token = next((t for t in market.tokens if t.token_id == token_id), market.tokens[0])
 
         # --- Guard 1: no duplicate positions in the same market ---
         existing = await self._get_open_position(market.market_id, token_id)
@@ -161,6 +164,21 @@ class PaperTrader:
 
         if fill_price <= 0:
             fill_price = 0.5
+
+        # Pre-execution price assertion: abort if fill price is outside the valid range.
+        # This catches token-side inversions that slipped past the PRICE_RANGE gate.
+        if not (self._settings.MIN_ENTRY_PRICE <= fill_price <= self._settings.MAX_ENTRY_PRICE):
+            logger.warning(
+                "paper_trader.price_assertion_failed",
+                token_id=token_id,
+                fill_price=round(fill_price, 4),
+                min_price=self._settings.MIN_ENTRY_PRICE,
+                max_price=self._settings.MAX_ENTRY_PRICE,
+            )
+            return ExecutionResult(
+                success=False,
+                reason=f"Price assertion failed: fill price {fill_price:.4f} outside [{self._settings.MIN_ENTRY_PRICE}, {self._settings.MAX_ENTRY_PRICE}]",
+            )
 
         shares = signal.copy_size_usdc / fill_price
         now = datetime.now(tz=timezone.utc)

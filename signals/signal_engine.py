@@ -60,6 +60,7 @@ class SignalDecision(BaseModel):
     roi_score: float = 0.0
     consistency_score: float = 0.0
     gate_failed: Optional[str] = None
+    token_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +308,28 @@ class SignalEngine:
                 )
 
         # ----------------------------------------------------------------
+        # Gate 8b: MAX_TIME_TO_RESOLUTION
+        # Ignore markets resolving too far in the future — capital efficiency.
+        # ----------------------------------------------------------------
+        if market.resolution_time is not None:
+            rt = market.resolution_time
+            if rt.tzinfo is None:
+                rt = rt.replace(tzinfo=timezone.utc)
+            now = datetime.now(tz=timezone.utc)
+            hours_remaining = (rt - now).total_seconds() / 3600
+            if hours_remaining > self._settings.MAX_HOURS_TO_RESOLUTION:
+                return SignalDecision(
+                    should_trade=False,
+                    copy_size_usdc=0.0,
+                    reason=(
+                        f"MAX_TIME_TO_RESOLUTION: {hours_remaining:.0f}h until resolution "
+                        f"exceeds max {self._settings.MAX_HOURS_TO_RESOLUTION}h"
+                    ),
+                    whale_score=whale_score,
+                    gate_failed="MAX_TIME_TO_RESOLUTION",
+                )
+
+        # ----------------------------------------------------------------
         # Gate 9: CIRCUIT_BREAKER
         # ----------------------------------------------------------------
         if await self._risk_gate.is_circuit_breaker_active():  # type: ignore[attr-defined]
@@ -335,6 +358,7 @@ class SignalEngine:
             whale_score=whale_score,
             roi_score=roi_score,
             consistency_score=consistency_score,
+            token_id=trade.token_id,
         )
 
     # ------------------------------------------------------------------
