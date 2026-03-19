@@ -18,8 +18,11 @@ import os
 import sys
 from datetime import datetime, timezone
 
+import ssl
+
 import aiohttp
 import anthropic
+import certifi
 
 
 # ---------------------------------------------------------------------------
@@ -30,18 +33,26 @@ import anthropic
 async def fetch_all(base_url: str) -> dict:
     """Fetch all monitoring API endpoints and return combined data dict."""
     base_url = base_url.rstrip("/")
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        async def get(path: str):
-            async with session.get(f"{base_url}{path}") as r:
-                r.raise_for_status()
-                return await r.json()
+    ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+    connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=30)) as session:
+        async def get(path: str, fallback=None):
+            try:
+                async with session.get(f"{base_url}{path}") as r:
+                    if r.status >= 400:
+                        print(f"  Warning: {path} returned {r.status}, skipping.")
+                        return fallback if fallback is not None else {}
+                    return await r.json()
+            except Exception as e:
+                print(f"  Warning: {path} failed ({e}), skipping.")
+                return fallback if fallback is not None else {}
 
         status, metrics, positions, funnel, tiers = await asyncio.gather(
             get("/api/status"),
             get("/api/metrics"),
-            get("/api/positions?limit=200&status=all"),
-            get("/api/signals/funnel"),
-            get("/api/tier_breakdown"),
+            get("/api/positions?limit=200&status=all", fallback=[]),
+            get("/api/signals/funnel", fallback=[]),
+            get("/api/tier_breakdown", fallback=[]),
         )
 
     return {
