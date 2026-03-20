@@ -23,6 +23,7 @@ Bankroll accounting:
 
 from __future__ import annotations
 
+import asyncio
 import math
 from datetime import datetime, timezone
 from typing import Optional
@@ -105,6 +106,8 @@ class PaperTrader:
         self._alerter = alerter
         self._redis = redis_client
         self._settings = get_settings()
+        # Per-market locks prevent duplicate positions from concurrent trade events
+        self._market_locks: dict[str, asyncio.Lock] = {}
 
     async def execute(
         self,
@@ -122,14 +125,30 @@ class PaperTrader:
         if not market.tokens:
             return ExecutionResult(success=False, reason="No tokens for market", gate_failed="NO_MARKET_TOKENS")
 
+        # Serialize concurrent fills for the same market to prevent race-condition
+        # duplicates (two trades arriving within milliseconds both see no open position).
+        if market.market_id not in self._market_locks:
+            self._market_locks[market.market_id] = asyncio.Lock()
+
+        async with self._market_locks[market.market_id]:
+            return await self._execute_locked(signal, market, copied_from_wallet)
+
+    async def _execute_locked(
+        self,
+        signal: SignalDecision,
+        market: Market,
+        copied_from_wallet: str,
+    ) -> ExecutionResult:
+        """Inner execute — called only while holding the per-market lock."""
         # Use the token the whale actually traded (from signal), not just tokens[0].
         # tokens[0] may be the opposite outcome (e.g. NO when whale bought YES),
         # causing fills at ~$1.00 on near-resolved tokens.
         token_id = signal.token_id if signal.token_id else market.tokens[0].token_id
         token = next((t for t in market.tokens if t.token_id == token_id), market.tokens[0])
 
-        # --- Guard 1: no duplicate positions in the same market ---
-        existing = await self._get_open_position(market.market_id, token_id)
+        # --- Guard 1: no duplicate positions in the same market (any token) ---
+        # Check by market_id only — prevents holding both YES and NO simultaneously.
+        existing = await self._get_open_position(market.market_id)
         if existing is not None:
             logger.info(
                 "paper_trader.duplicate_skipped",
@@ -402,15 +421,14 @@ class PaperTrader:
             logger.warning("paper_trader.bankroll_deduct_failed", error=str(exc))
 
     async def _get_open_position(
-        self, market_id: str, token_id: str
+        self, market_id: str
     ) -> Optional[BotPosition]:
-        """Return an existing open position for this market+token, or None."""
+        """Return an existing open position for this market (any token), or None."""
         try:
             async with AsyncSessionLocal() as session:
                 result = await session.execute(
                     select(BotPosition).where(
                         BotPosition.market_id == market_id,
-                        BotPosition.token_id == token_id,
                         BotPosition.status == PositionStatus.OPEN,
                         BotPosition.is_simulated.is_(True),
                     ).limit(1)
