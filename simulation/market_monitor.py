@@ -43,10 +43,12 @@ class MarketMonitor:
         clob_client: CLOBClient,
         alerter: object,
         paper_trader: object,
+        redis_client: object = None,
     ) -> None:
         self._clob = clob_client
         self._alerter = alerter
         self._paper_trader = paper_trader
+        self._redis = redis_client
         self._settings = get_settings()
 
     # ------------------------------------------------------------------
@@ -107,8 +109,39 @@ class MarketMonitor:
                     take_profit = self._settings.SIM_TAKE_PROFIT_PCT
                     if pnl_pct <= stop_loss:
                         await self._force_close_position(pos, current_price, "STOP_LOSS")
+                        continue
                     elif pnl_pct >= take_profit:
                         await self._force_close_position(pos, current_price, "TAKE_PROFIT")
+                        continue
+
+                # Time-based exit: close at 50% of elapsed position window if profitable.
+                # Resolution time is cached in Redis when the position is opened.
+                if self._redis is not None:
+                    try:
+                        rt_raw = await self._redis.get(f"pos:{pos.id}:resolution_time")  # type: ignore[union-attr]
+                        if rt_raw:
+                            rt_str = rt_raw.decode() if isinstance(rt_raw, bytes) else rt_raw
+                            from datetime import timezone as _tz
+                            rt = datetime.fromisoformat(rt_str)
+                            if rt.tzinfo is None:
+                                rt = rt.replace(tzinfo=timezone.utc)
+                            opened = pos.opened_at
+                            if opened.tzinfo is None:
+                                opened = opened.replace(tzinfo=timezone.utc)
+                            total_secs = (rt - opened).total_seconds()
+                            elapsed_secs = (now - opened).total_seconds()
+                            if total_secs > 0 and elapsed_secs / total_secs >= 0.5:
+                                if unrealized_pnl > 0:
+                                    logger.info(
+                                        "market_monitor.time_exit_triggered",
+                                        position_id=pos.id,
+                                        elapsed_pct=round(elapsed_secs / total_secs * 100, 1),
+                                        unrealized_pnl=round(unrealized_pnl, 2),
+                                    )
+                                    await self._force_close_position(pos, current_price, "TIME_EXIT")
+                                    continue
+                    except Exception as exc:
+                        logger.debug("market_monitor.time_exit_check_failed", pos_id=pos.id, error=str(exc))
 
             except Exception as exc:
                 logger.warning(

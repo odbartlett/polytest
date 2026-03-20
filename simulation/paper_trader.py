@@ -168,18 +168,21 @@ class PaperTrader:
             fill_price = 0.5
 
         # Pre-execution price assertion: abort if fill price is outside the valid range.
-        # This catches token-side inversions that slipped past the PRICE_RANGE gate.
-        if not (self._settings.MIN_ENTRY_PRICE <= fill_price <= self._settings.MAX_ENTRY_PRICE):
+        # Uses SIM_FILL_PRICE_MAX (wider than MAX_ENTRY_PRICE) to allow for market
+        # movement between the whale's trade and our fill — catches token-side inversions
+        # ($0.99 fills) while accepting legitimate post-whale-trade price shifts.
+        fill_price_max = self._settings.SIM_FILL_PRICE_MAX
+        if not (self._settings.MIN_ENTRY_PRICE <= fill_price <= fill_price_max):
             logger.warning(
                 "paper_trader.price_assertion_failed",
                 token_id=token_id,
                 fill_price=round(fill_price, 4),
                 min_price=self._settings.MIN_ENTRY_PRICE,
-                max_price=self._settings.MAX_ENTRY_PRICE,
+                max_price=fill_price_max,
             )
             return ExecutionResult(
                 success=False,
-                reason=f"Price assertion failed: fill price {fill_price:.4f} outside [{self._settings.MIN_ENTRY_PRICE}, {self._settings.MAX_ENTRY_PRICE}]",
+                reason=f"Price assertion failed: fill price {fill_price:.4f} outside [{self._settings.MIN_ENTRY_PRICE}, {fill_price_max}]",
                 gate_failed="PRICE_ASSERTION_FAILED",
             )
 
@@ -230,6 +233,17 @@ class PaperTrader:
                     fill_price=fill_price,
                 )
                 session.add(bot_order)
+
+        # --- Cache resolution time for time-based exit checks ---
+        if market.resolution_time is not None:
+            try:
+                await self._redis.setex(  # type: ignore[union-attr]
+                    f"pos:{position_id}:resolution_time",
+                    86400 * 30,  # 30-day TTL
+                    market.resolution_time.isoformat(),
+                )
+            except Exception:
+                pass
 
         # --- Deduct from liquid bankroll ---
         await self._deduct_from_bankroll(signal.copy_size_usdc)

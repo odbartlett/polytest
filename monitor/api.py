@@ -280,6 +280,40 @@ async def get_whitelist(limit: int = 20) -> JSONResponse:
     return JSONResponse(wallets)
 
 
+@app.get("/api/latency")
+async def get_latency() -> JSONResponse:
+    """Signal latency stats — time between whale trade and bot evaluation."""
+    redis = await _get_redis()
+    try:
+        raw = await redis.lrange("bot:latency:samples", 0, -1)
+        samples = [float(v) for v in raw if v]
+    except Exception:
+        samples = []
+
+    if not samples:
+        return JSONResponse({"p50_ms": None, "p95_ms": None, "p99_ms": None, "samples": 0, "warning": "no data yet"})
+
+    samples.sort()
+    n = len(samples)
+    p50 = samples[int(n * 0.50)]
+    p95 = samples[min(int(n * 0.95), n - 1)]
+    p99 = samples[min(int(n * 0.99), n - 1)]
+
+    warning = None
+    if p50 > 30_000:
+        warning = "Median latency >30s — signal feed may be polling rather than streaming"
+    elif p50 > 5_000:
+        warning = "Median latency >5s — consider optimising WebSocket processing pipeline"
+
+    return JSONResponse({
+        "p50_ms": round(p50, 1),
+        "p95_ms": round(p95, 1),
+        "p99_ms": round(p99, 1),
+        "samples": n,
+        "warning": warning,
+    })
+
+
 @app.get("/api/tier_breakdown")
 async def get_tier_breakdown() -> JSONResponse:
     """P&L broken down by whale score tier."""

@@ -1,10 +1,15 @@
 """Signal generation and validation engine.
 
-Implements 8 sequential gate checks. The first failing gate short-circuits
+Implements 9 sequential gate checks. The first failing gate short-circuits
 evaluation and returns should_trade=False with the specific failure reason.
 
 Copy sizing is computed using a tiered percentage of bankroll scaled by a
 confidence multiplier derived from the whale's ROI and consistency scores.
+
+SELL→BUY-NO conversion (Gate 0):
+  A whale selling YES at $0.75 is equivalent to buying NO at $0.25.
+  Before Gate 1 we attempt to convert SELL signals into their BUY-NO
+  equivalent so both sides of the market contribute to signal volume.
 """
 
 from __future__ import annotations
@@ -52,6 +57,23 @@ def _get_tier_pct(score: float) -> float:
 # ---------------------------------------------------------------------------
 
 
+# Common English stop-words excluded from keyword-based correlation detection
+_STOPWORDS: frozenset[str] = frozenset({
+    "will", "the", "what", "when", "does", "have", "this", "that", "with",
+    "from", "they", "their", "which", "would", "could", "than", "more",
+    "less", "year", "time", "2024", "2025", "2026", "2027", "before",
+    "after", "over", "under", "into", "been", "were", "about", "also",
+})
+
+
+def _extract_keywords(text: str) -> set[str]:
+    """Return significant words (len≥4, not a stop-word) from a market question."""
+    if not text:
+        return set()
+    words = text.lower().replace("?", " ").replace(",", " ").split()
+    return {w.strip("\"'()!.") for w in words if len(w) >= 4 and w not in _STOPWORDS}
+
+
 class SignalDecision(BaseModel):
     should_trade: bool
     copy_size_usdc: float
@@ -61,6 +83,7 @@ class SignalDecision(BaseModel):
     consistency_score: float = 0.0
     gate_failed: Optional[str] = None
     token_id: str = ""
+    latency_ms: float = 0.0  # ms between whale trade timestamp and bot evaluation
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +114,28 @@ class SignalEngine:
 
         Gates are checked in order — first failure short-circuits.
         """
+        # Measure latency from whale's trade to our evaluation
+        latency_ms = (datetime.now(tz=timezone.utc) - trade.timestamp).total_seconds() * 1000
+        logger.debug("signal.latency_check", latency_ms=round(latency_ms, 1))
+
+        # ----------------------------------------------------------------
+        # Gate 0: SELL → BUY-NO conversion
+        # A whale selling YES at $p is equivalent to buying NO at $1-p.
+        # We attempt conversion before Gate 1 so SELL signals contribute to
+        # signal volume without changing any downstream logic.
+        # ----------------------------------------------------------------
+        if trade.side == "SELL":
+            converted = await self._convert_sell_to_buy_no(trade)
+            if converted is None:
+                return SignalDecision(
+                    should_trade=False,
+                    copy_size_usdc=0.0,
+                    reason="TRADE_IS_BUY: SELL with no convertible paired token",
+                    whale_score=0.0,
+                    gate_failed="TRADE_IS_BUY",
+                    latency_ms=latency_ms,
+                )
+            trade = converted  # shadow — all gates below operate on the converted BUY-NO trade
 
         # ----------------------------------------------------------------
         # Gate 1: TRADE_IS_BUY
@@ -102,6 +147,7 @@ class SignalEngine:
                 reason="TRADE_IS_BUY: trade side is not BUY",
                 whale_score=0.0,
                 gate_failed="TRADE_IS_BUY",
+                latency_ms=latency_ms,
             )
 
         # ----------------------------------------------------------------
@@ -342,6 +388,21 @@ class SignalEngine:
             )
 
         # ----------------------------------------------------------------
+        # Gate 10: CORRELATED_MARKET
+        # Prevent stacking positions on effectively-the-same event.
+        # Markets with >50% keyword overlap with an existing open position
+        # are treated as correlated and skipped.
+        # ----------------------------------------------------------------
+        if await self._has_correlated_position(market):
+            return SignalDecision(
+                should_trade=False,
+                copy_size_usdc=0.0,
+                reason=f"CORRELATED_MARKET: similar market already held ({market.question[:60]})",
+                whale_score=whale_score,
+                gate_failed="CORRELATED_MARKET",
+            )
+
+        # ----------------------------------------------------------------
         # All gates passed — emit signal
         # ----------------------------------------------------------------
         logger.info(
@@ -350,6 +411,7 @@ class SignalEngine:
             market=trade.market_id,
             copy_size_usdc=copy_size,
             whale_score=whale_score,
+            latency_ms=round(latency_ms, 1),
         )
         return SignalDecision(
             should_trade=True,
@@ -359,11 +421,111 @@ class SignalEngine:
             roi_score=roi_score,
             consistency_score=consistency_score,
             token_id=trade.token_id,
+            latency_ms=latency_ms,
         )
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    async def _convert_sell_to_buy_no(self, trade: TradeEvent) -> Optional[TradeEvent]:
+        """Convert a SELL YES signal to an equivalent BUY NO signal.
+
+        Selling YES at $p implies the seller believes the true probability is
+        lower than $p — equivalent to buying NO at $1-p.  We fetch the market
+        to find the paired token and return a modified TradeEvent.
+
+        Returns None if the market cannot be fetched or has no paired token.
+        """
+        market = _market_cache.get(trade.market_id)
+        if market is None:
+            try:
+                market = await self._clob.get_market(trade.market_id)
+                _market_cache[trade.market_id] = market
+            except Exception:
+                return None
+
+        if len(market.tokens) < 2:
+            return None
+
+        # Find the token opposite to the one being sold
+        paired_token = next(
+            (t for t in market.tokens if t.token_id != trade.token_id), None
+        )
+        if paired_token is None:
+            return None
+
+        equivalent_price = round(1.0 - trade.price, 6)
+
+        logger.debug(
+            "signal.sell_to_buy_no",
+            market=trade.market_id,
+            sold_token=trade.token_id,
+            paired_token=paired_token.token_id,
+            sell_price=trade.price,
+            equivalent_buy_price=equivalent_price,
+        )
+
+        return TradeEvent(
+            wallet_address=trade.wallet_address,
+            market_id=trade.market_id,
+            token_id=paired_token.token_id,
+            side="BUY",
+            price=equivalent_price,
+            size_usdc=trade.size_usdc,
+            timestamp=trade.timestamp,
+            transaction_hash=trade.transaction_hash,
+        )
+
+    async def _has_correlated_position(self, market: Market) -> bool:
+        """Return True if an open position covers a correlated market.
+
+        Two markets are considered correlated when their questions share
+        more than 50% of their significant keywords (Jaccard similarity).
+        A simple check prevents stacking the same directional exposure
+        across multiple markets that track the same underlying event.
+        """
+        from db.models import BotPosition, PositionStatus
+        from db.session import AsyncSessionLocal
+        from sqlalchemy import select
+
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(BotPosition.market_id, BotPosition.market_question).where(
+                        BotPosition.status == PositionStatus.OPEN,
+                        BotPosition.is_simulated.is_(True),
+                    )
+                )
+                open_positions = result.all()
+
+            if not open_positions:
+                return False
+
+            current_words = _extract_keywords(market.question)
+            if not current_words:
+                return False
+
+            for pos_market_id, question in open_positions:
+                if pos_market_id == market.market_id:
+                    continue  # duplicate position gate already handles this
+                other_words = _extract_keywords(question or "")
+                if not other_words:
+                    continue
+                union = current_words | other_words
+                intersection = current_words & other_words
+                if len(union) > 0 and len(intersection) / len(union) >= 0.5:
+                    logger.debug(
+                        "signal.correlated_market",
+                        market=market.market_id,
+                        correlated_with=pos_market_id,
+                        overlap=round(len(intersection) / len(union), 2),
+                    )
+                    return True
+
+            return False
+        except Exception:
+            return False
 
     async def _get_bankroll(self) -> float:
         """Read current bankroll from Redis, fall back to settings default.

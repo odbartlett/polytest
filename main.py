@@ -234,9 +234,19 @@ class WhaleBot:
             )
             logger.debug("pipeline.ledger_updated", classification=classification.value)
 
-            # 2. Evaluate signal
+            # Copy-exit: when aggregate market position flips direction, close our copy.
+            # A large sell reversing a previous buy is a bearish signal from the market.
+            from signals.position_ledger import TradeClassification as TC
+            if classification == TC.FLIP and trade.side == "SELL":
+                asyncio.create_task(self._try_copy_exit(trade.market_id, trade.size_usdc))
+
+            # 2. Evaluate signal (includes SELL→BUY-NO conversion and latency measurement)
             assert self._signal_engine is not None
             signal = await self._signal_engine.evaluate(trade)
+
+            # Cache signal latency for monitoring (use signal's latency_ms when available)
+            if signal.latency_ms > 0:
+                asyncio.create_task(self._cache_latency(signal.latency_ms))
 
             # 3. Gate rejection — log and exit early
             if not signal.should_trade:
@@ -384,6 +394,7 @@ class WhaleBot:
             clob_client=self._clob_client,
             alerter=self._alerter,
             paper_trader=self._paper_trader,
+            redis_client=self._redis,
         )
 
         # In sim mode we still need a RiskGate for the signal engine's circuit breaker
@@ -495,6 +506,60 @@ class WhaleBot:
             pass
 
         logger.info("bot.shutdown.complete")
+
+    async def _try_copy_exit(self, market_id: str, trigger_size_usdc: float) -> None:
+        """Close our open position when the aggregate market direction flips.
+
+        A FLIP classification means a large SELL has reversed the accumulated
+        position tracked by the ledger — a bearish signal.  We close any open
+        simulated position in that market at the current mid-price.
+        """
+        if not self._settings.SIMULATION_MODE or self._market_monitor is None:
+            return
+        from db.models import BotPosition, PositionStatus
+        from db.session import AsyncSessionLocal
+        from sqlalchemy import select
+
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(BotPosition).where(
+                        BotPosition.market_id == market_id,
+                        BotPosition.status == PositionStatus.OPEN,
+                        BotPosition.is_simulated.is_(True),
+                    ).limit(1)
+                )
+                pos = result.scalar_one_or_none()
+
+            if pos is None:
+                return
+
+            current_price = await self._market_monitor._get_mid_price(pos.token_id)  # type: ignore[attr-defined]
+            if current_price is None:
+                current_price = pos.current_price or pos.entry_price
+
+            logger.info(
+                "pipeline.copy_exit",
+                market=market_id,
+                position_id=pos.id,
+                exit_price=round(current_price, 4),
+                trigger_sell_size=round(trigger_size_usdc, 2),
+            )
+            await self._market_monitor._force_close_position(pos, current_price, "COPY_EXIT")  # type: ignore[attr-defined]
+        except Exception as exc:
+            logger.warning("pipeline.copy_exit_failed", market=market_id, error=str(exc))
+
+    async def _cache_latency(self, latency_ms: float) -> None:
+        """Push latency sample into Redis ring buffer for monitoring API."""
+        if self._redis is None:
+            return
+        try:
+            key = "bot:latency:samples"
+            await self._redis.lpush(key, str(round(latency_ms, 1)))
+            await self._redis.ltrim(key, 0, 999)   # keep last 1000 samples
+            await self._redis.expire(key, 86400)    # 24h TTL
+        except Exception:
+            pass
 
     def handle_signal(self, sig: signal.Signals) -> None:
         """Signal handler for SIGINT/SIGTERM."""
