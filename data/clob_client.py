@@ -481,11 +481,12 @@ def _parse_orderbook(token_id: str, raw: dict[str, Any]) -> Orderbook:
                 result.append(OrderLevel(price=float(lv[0]), size=float(lv[1])))
         return result
 
-    return Orderbook(
-        token_id=token_id,
-        bids=parse_levels(raw.get("bids", [])),
-        asks=parse_levels(raw.get("asks", [])),
-    )
+    # CLOB API returns both asks and bids worst-first (asks descending, bids
+    # ascending).  Sort to standard orderbook convention: asks ascending
+    # (best/lowest ask first) and bids descending (best/highest bid first).
+    asks = sorted(parse_levels(raw.get("asks", [])), key=lambda lv: lv.price)
+    bids = sorted(parse_levels(raw.get("bids", [])), key=lambda lv: -lv.price)
+    return Orderbook(token_id=token_id, bids=bids, asks=asks)
 
 
 def _parse_trade_event(raw: dict[str, Any], wallet_address: str) -> TradeEvent:
