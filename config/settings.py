@@ -104,10 +104,10 @@ class Settings(BaseSettings):
     # Only copy trades where the token price implies real upside.
     # A token at $0.95 has $0.05 upside vs $0.95 downside — terrible odds.
     # A token at $0.10 has $0.90 upside vs $0.10 downside — worthwhile.
-    MIN_ENTRY_PRICE: float = 0.05   # below this = near-zero probability, skip
-    MAX_ENTRY_PRICE: float = 0.85   # above this = near-certain, no upside left (used by signal engine for whale trade price filter)
-    SIM_FILL_PRICE_MAX: float = 0.93  # paper_trader fill assertion max — wider than MAX_ENTRY_PRICE to allow for market movement after the whale's trade
-    MAX_HOURS_TO_RESOLUTION: int = 2160   # 90 days — ignore markets resolving > 90 days out
+    MIN_ENTRY_PRICE: float = 0.03   # below this = near-zero probability, skip
+    MAX_ENTRY_PRICE: float = 0.90   # above this = near-certain, no upside left (used by signal engine for whale trade price filter)
+    SIM_FILL_PRICE_MAX: float = 0.97  # paper_trader fill assertion max — wider than MAX_ENTRY_PRICE to allow for market movement after the whale's trade
+    MAX_HOURS_TO_RESOLUTION: int = 999999   # effectively unlimited — time-based exit handles long-dated positions
     SIM_STOP_LOSS_PCT: float = 0.30       # auto-close position if unrealized loss > 30%
     SIM_TAKE_PROFIT_PCT: float = 0.50     # auto-close position if unrealized gain > 50%
 

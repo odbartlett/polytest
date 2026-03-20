@@ -173,16 +173,19 @@ class PaperTrader:
         # ($0.99 fills) while accepting legitimate post-whale-trade price shifts.
         fill_price_max = self._settings.SIM_FILL_PRICE_MAX
         if not (self._settings.MIN_ENTRY_PRICE <= fill_price <= fill_price_max):
+            direction = "TOO_HIGH" if fill_price > fill_price_max else "TOO_LOW"
             logger.warning(
                 "paper_trader.price_assertion_failed",
                 token_id=token_id,
                 fill_price=round(fill_price, 4),
+                whale_trade_price=round(signal.copy_size_usdc, 4),
+                direction=direction,
                 min_price=self._settings.MIN_ENTRY_PRICE,
                 max_price=fill_price_max,
             )
             return ExecutionResult(
                 success=False,
-                reason=f"Price assertion failed: fill price {fill_price:.4f} outside [{self._settings.MIN_ENTRY_PRICE}, {fill_price_max}]",
+                reason=f"Price assertion failed: fill price {fill_price:.4f} outside [{self._settings.MIN_ENTRY_PRICE}, {fill_price_max}] ({direction})",
                 gate_failed="PRICE_ASSERTION_FAILED",
             )
 
