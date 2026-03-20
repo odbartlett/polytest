@@ -22,7 +22,7 @@ import json
 import ssl
 import time
 from collections.abc import Callable, Coroutine
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
@@ -306,13 +306,15 @@ async def _handle_market_message(
                 ts_raw = change.get("timestamp") or time.time()
                 if isinstance(ts_raw, str) and ts_raw.isdigit():
                     # Milliseconds timestamp string
-                    timestamp = datetime.utcfromtimestamp(int(ts_raw) / 1000)
+                    timestamp = datetime.fromtimestamp(int(ts_raw) / 1000, tz=timezone.utc)
                 elif isinstance(ts_raw, (int, float)):
                     ts_f = float(ts_raw)
                     # Heuristic: ms timestamps are > 1e12
-                    timestamp = datetime.utcfromtimestamp(ts_f / 1000 if ts_f > 1e12 else ts_f)
+                    timestamp = datetime.fromtimestamp(ts_f / 1000 if ts_f > 1e12 else ts_f, tz=timezone.utc)
                 else:
                     timestamp = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                    if timestamp.tzinfo is None:
+                        timestamp = timestamp.replace(tzinfo=timezone.utc)
 
                 side_raw = (change.get("side") or "BUY").upper()
                 side = "BUY" if side_raw in ("BUY", "LONG", "YES") else "SELL"
@@ -421,9 +423,11 @@ def _parse_ws_trade(event: dict[str, Any]) -> TradeEvent:
     """Convert a raw WebSocket trade event to a TradeEvent model."""
     ts_raw = event.get("timestamp") or event.get("created_at") or time.time()
     if isinstance(ts_raw, (int, float)):
-        timestamp = datetime.utcfromtimestamp(float(ts_raw))
+        timestamp = datetime.fromtimestamp(float(ts_raw), tz=timezone.utc)
     else:
         timestamp = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
 
     maker_address = event.get("maker_address", event.get("user", ""))
     taker_address = event.get("taker_address", "")
