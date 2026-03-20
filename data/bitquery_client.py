@@ -23,7 +23,7 @@ logger = structlog.get_logger(__name__)
 
 _settings = get_settings()
 
-BITQUERY_ENDPOINT = "https://graphql.bitquery.io"
+BITQUERY_ENDPOINT = "https://streaming.bitquery.io/graphql"  # Bitquery V2
 
 # Polymarket Conditional Token Framework (CTF) contract on Polygon
 POLYMARKET_CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
@@ -81,34 +81,42 @@ class HistoricalTrade(BaseModel):
 _WALLET_TRADES_QUERY = """
 query WalletConditionalTrades(
   $wallet: String!,
-  $from: ISO8601DateTime!,
-  $till: ISO8601DateTime!,
+  $from: String!,
+  $till: String!,
   $limit: Int!,
   $offset: Int!
 ) {
-  ethereum(network: matic) {
-    transfers(
-      options: {limit: $limit, offset: $offset, asc: "block.timestamp.time"}
-      any: [
-        {
-          sender: {is: $wallet}
-          currency: {address: {in: ["%(ctf)s", "%(negrisk)s"]}}
-          date: {since: $from, till: $till}
-        }
-        {
-          receiver: {is: $wallet}
-          currency: {address: {in: ["%(ctf)s", "%(negrisk)s"]}}
-          date: {since: $from, till: $till}
-        }
-      ]
+  EVM(network: matic) {
+    Transfers(
+      where: {
+        any: [
+          {
+            Transfer: {
+              Sender: {is: $wallet}
+              Currency: {SmartContract: {in: ["%(ctf)s", "%(negrisk)s"]}}
+            }
+          }
+          {
+            Transfer: {
+              Receiver: {is: $wallet}
+              Currency: {SmartContract: {in: ["%(ctf)s", "%(negrisk)s"]}}
+            }
+          }
+        ]
+        Block: {Date: {since: $from, till: $till}}
+      }
+      limit: {count: $limit, offset: $offset}
+      orderBy: {ascending: Block_Time}
     ) {
-      transaction { hash }
-      block { timestamp { iso8601 } }
-      sender { address }
-      receiver { address }
-      amount
-      currency { address symbol tokenType }
-      entityId
+      Transaction { Hash }
+      Block { Time }
+      Transfer {
+        Sender
+        Receiver
+        Amount
+        Currency { SmartContract Symbol }
+        Id
+      }
     }
   }
 }
@@ -116,24 +124,6 @@ query WalletConditionalTrades(
     "ctf": POLYMARKET_CTF_ADDRESS,
     "negrisk": POLYMARKET_NEGRISK_CTF,
 }
-
-_USDC_TRANSFERS_QUERY = """
-query USDCTransfers(
-  $wallet: String!,
-  $tx_hash: String!
-) {
-  ethereum(network: matic) {
-    transfers(
-      txHash: {is: $tx_hash}
-      currency: {address: {is: "%(usdc)s"}}
-    ) {
-      sender { address }
-      receiver { address }
-      amount
-    }
-  }
-}
-""" % {"usdc": USDC_ADDRESS}
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +144,7 @@ class BitqueryClient:
         self._session = aiohttp.ClientSession(
             headers={
                 "Content-Type": "application/json",
-                "X-API-KEY": self._settings.BITQUERY_API_KEY,
+                "Authorization": f"Bearer {self._settings.BITQUERY_API_KEY}",
             }
         )
         return self
@@ -183,16 +173,16 @@ class BitqueryClient:
                 _WALLET_TRADES_QUERY,
                 variables={
                     "wallet": wallet_address.lower(),
-                    "from": start_date.strftime("%Y-%m-%dT%H:%M:%S"),
-                    "till": end_date.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "from": start_date.strftime("%Y-%m-%d"),
+                    "till": end_date.strftime("%Y-%m-%d"),
                     "limit": self.PAGE_SIZE,
                     "offset": offset,
                 },
             )
             transfers = (
                 page.get("data", {})
-                .get("ethereum", {})
-                .get("transfers", [])
+                .get("EVM", {})
+                .get("Transfers", [])
             )
             if not transfers:
                 break
@@ -264,7 +254,7 @@ class BitqueryClient:
         # Group by tx hash
         by_tx: dict[str, list[dict[str, Any]]] = {}
         for t in transfers:
-            tx_hash = t.get("transaction", {}).get("hash", "")
+            tx_hash = t.get("Transaction", {}).get("Hash", "")
             if tx_hash not in by_tx:
                 by_tx[tx_hash] = []
             by_tx[tx_hash].append(t)
@@ -272,26 +262,34 @@ class BitqueryClient:
         results: list[HistoricalTrade] = []
         wallet_lower = wallet_address.lower()
 
+        ZERO_ADDR = "0x0000000000000000000000000000000000000000"
+
         for tx_hash, tx_transfers in by_tx.items():
             # Use the first transfer for timestamp / block info
             first = tx_transfers[0]
-            ts_raw = first.get("block", {}).get("timestamp", {}).get("iso8601", "")
+            ts_raw = first.get("Block", {}).get("Time", "")
             try:
                 timestamp = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
             except (ValueError, AttributeError):
                 timestamp = datetime.utcnow()
 
-            # Determine side and token amount
+            # Determine side and token amount from V2 field names
             token_amount = 0.0
             token_id = ""
             side = "BUY"
 
             for t in tx_transfers:
-                receiver = t.get("receiver", {}).get("address", "")
-                sender = t.get("sender", {}).get("address", "")
-                amount = float(t.get("amount", 0))
-                currency_addr = t.get("currency", {}).get("address", "")
-                entity_id = t.get("entityId", "")
+                xfer = t.get("Transfer", {})
+                receiver = xfer.get("Receiver", "")
+                sender = xfer.get("Sender", "")
+                # Skip mint/burn (zero-address) events
+                if sender == ZERO_ADDR or receiver == ZERO_ADDR:
+                    continue
+                amount_raw = float(xfer.get("Amount", 0))
+                # CTF tokens have 6 decimals — convert to whole shares
+                amount = amount_raw / 1_000_000
+                currency_addr = xfer.get("Currency", {}).get("SmartContract", "")
+                entity_id = xfer.get("Id", "")
 
                 if currency_addr.lower() in (
                     POLYMARKET_CTF_ADDRESS.lower(),
