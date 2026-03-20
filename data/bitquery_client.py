@@ -78,6 +78,36 @@ class HistoricalTrade(BaseModel):
 # GraphQL queries
 # ---------------------------------------------------------------------------
 
+_TOP_TRADERS_QUERY = """
+query TopPolymarketTraders($from: String!, $till: String!) {
+  EVM(network: matic) {
+    Transfers(
+      where: {
+        Transfer: {
+          Receiver: {not: {in: [
+            "0x0000000000000000000000000000000000000000",
+            "%(ctf)s",
+            "%(negrisk)s"
+          ]}}
+          Currency: {SmartContract: {in: ["%(ctf)s", "%(negrisk)s"]}}
+        }
+        Block: {Date: {since: $from, till: $till}}
+      }
+      limit: {count: 1000}
+      orderBy: {descending: Block_Time}
+    ) {
+      Transfer {
+        Receiver
+        Amount
+      }
+    }
+  }
+}
+""" % {
+    "ctf": POLYMARKET_CTF_ADDRESS,
+    "negrisk": POLYMARKET_NEGRISK_CTF,
+}
+
 _WALLET_TRADES_QUERY = """
 query WalletConditionalTrades(
   $wallet: String!,
@@ -153,6 +183,46 @@ class BitqueryClient:
         if self._session:
             await self._session.close()
             self._session = None
+
+    async def get_top_trader_wallets(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        limit: int = 200,
+    ) -> list[str]:
+        """Discover active Polymarket whale candidates from on-chain CTF transfers.
+
+        Fetches recent CTF token transfer events and ranks wallet addresses by
+        how often they appear as receivers (proxy for consistent buying activity).
+        Returns up to ``limit`` addresses sorted by activity count.
+        """
+        page = await self._query(
+            _TOP_TRADERS_QUERY,
+            variables={
+                "from": start_date.strftime("%Y-%m-%d"),
+                "till": end_date.strftime("%Y-%m-%d"),
+            },
+        )
+        transfers = (
+            page.get("data", {})
+            .get("EVM", {})
+            .get("Transfers", [])
+        )
+
+        # Rank by frequency — most active buyers come first
+        addr_counts: dict[str, int] = {}
+        for t in transfers:
+            receiver = t.get("Transfer", {}).get("Receiver", "")
+            if receiver and len(receiver) == 42 and receiver.startswith("0x"):
+                addr_counts[receiver] = addr_counts.get(receiver, 0) + 1
+
+        sorted_addrs = sorted(addr_counts, key=lambda a: addr_counts[a], reverse=True)
+        logger.info(
+            "bitquery.top_traders.discovered",
+            raw_transfers=len(transfers),
+            unique_wallets=len(addr_counts),
+        )
+        return sorted_addrs[:limit]
 
     async def get_wallet_trade_history(
         self,

@@ -235,60 +235,28 @@ class WhitelistManager:
         return list(dict.fromkeys(candidates))  # deduplicate, preserve order
 
     async def _discover_wallets_from_clob(self) -> list[str]:
-        """Discover active whale wallets from the Polymarket public leaderboard API.
+        """Discover active whale wallets via Bitquery on-chain CTF transfer data.
 
-        Uses data-api.polymarket.com/leaderboard — fully public, no auth required.
-        Returns addresses of top profit-generating traders ranked by P&L.
+        Primary path: queries Bitquery for the most active receivers of Polymarket
+        CTF tokens over the lookback window — no leaderboard API required.
+        Falls back to an empty list (warm-start from DB) when no key is configured.
         """
-        import aiohttp
-        import ssl
-        import certifi
+        if not _settings.BITQUERY_API_KEY:
+            logger.warning("whitelist.discovery.no_bitquery_key")
+            return []
 
-        ssl_ctx = ssl.create_default_context(cafile=certifi.where())
-        discovered: list[str] = []
-
-        # Fetch both monthly and all-time leaderboards for breadth
-        for window in ("1m", "all"):
-            url = "https://data-api.polymarket.com/leaderboard"
-            params = {"window": window, "limit": "100", "offset": "0"}
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        url,
-                        params=params,
-                        timeout=aiohttp.ClientTimeout(total=20.0),
-                        ssl=ssl_ctx,
-                    ) as resp:
-                        if resp.status != 200:
-                            logger.warning(
-                                "whitelist.leaderboard_discovery.bad_status",
-                                window=window, status=resp.status,
-                            )
-                            continue
-                        data = await resp.json(content_type=None)
-
-                entries = data if isinstance(data, list) else data.get("data", data.get("leaderboard", []))
-                for entry in entries:
-                    addr = (
-                        entry.get("address")
-                        or entry.get("user")
-                        or entry.get("proxy_wallet")
-                        or ""
-                    )
-                    if addr and len(addr) == 42 and addr.startswith("0x"):
-                        discovered.append(addr)
-
-                logger.info(
-                    "whitelist.leaderboard_discovery.window",
-                    window=window, found=len(entries),
+        try:
+            lookback_start = datetime.now(tz=timezone.utc) - timedelta(days=_settings.LOOKBACK_DAYS)
+            async with BitqueryClient() as bitquery:
+                wallets = await bitquery.get_top_trader_wallets(
+                    start_date=lookback_start,
+                    end_date=datetime.now(tz=timezone.utc),
                 )
-
-            except Exception as exc:
-                logger.warning("whitelist.leaderboard_discovery.failed", window=window, error=str(exc))
-
-        unique = list(dict.fromkeys(discovered))
-        logger.info("whitelist.leaderboard_discovery.complete", total=len(unique))
-        return unique
+            logger.info("whitelist.bitquery_discovery.complete", total=len(wallets))
+            return wallets
+        except Exception as exc:
+            logger.warning("whitelist.bitquery_discovery.failed", error=str(exc))
+            return []
 
     async def _get_wallets_with_open_positions(self) -> set[str]:
         """Return wallet addresses that have open bot positions copied from them."""
