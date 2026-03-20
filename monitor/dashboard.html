@@ -1006,7 +1006,7 @@ function renderTierBreakdown(tiers) {
 function renderWhaleLeaderboard(whales) {
   const tbody = $('whale-tbody');
   if (!whales || whales.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="5"><div class="unavailable">Data unavailable</div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5"><div class="unavailable">Whitelist refresh pending — whale wallets will appear after the first scoring cycle completes</div></td></tr>`;
     return;
   }
 
@@ -1090,7 +1090,7 @@ async function fetchAll() {
 
   // Whale leaderboard
   if (whitelist) renderWhaleLeaderboard(whitelist);
-  else $('whale-tbody').innerHTML = `<tr><td colspan="5"><div class="unavailable">Data unavailable</div></td></tr>`;
+  else $('whale-tbody').innerHTML = `<tr><td colspan="5"><div class="unavailable">Whitelist refresh pending — whale wallets will appear after the first scoring cycle completes</div></td></tr>`;
 
   // Footer timestamp
   $('last-updated').textContent = new Date().toLocaleString('en-US', {

@@ -247,8 +247,8 @@ class WhitelistManager:
         ssl_ctx = ssl.create_default_context(cafile=certifi.where())
         discovered: list[str] = []
 
-        # Fetch both all-time and monthly leaderboards for breadth
-        for window in ("monthly", "all"):
+        # Fetch both monthly and all-time leaderboards for breadth
+        for window in ("1m", "all"):
             url = "https://data-api.polymarket.com/leaderboard"
             params = {"window": window, "limit": "100", "offset": "0"}
             try:
