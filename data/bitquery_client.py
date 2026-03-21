@@ -84,11 +84,6 @@ query TopPolymarketTraders($from: String!, $till: String!) {
     Transfers(
       where: {
         Transfer: {
-          Receiver: {not: {in: [
-            "0x0000000000000000000000000000000000000000",
-            "%(ctf)s",
-            "%(negrisk)s"
-          ]}}
           Currency: {SmartContract: {in: ["%(ctf)s", "%(negrisk)s"]}}
         }
         Block: {Date: {since: $from, till: $till}}
@@ -203,17 +198,31 @@ class BitqueryClient:
                 "till": end_date.strftime("%Y-%m-%d"),
             },
         )
+        data_node = page.get("data") or {}
         transfers = (
-            page.get("data", {})
+            data_node
             .get("EVM", {})
             .get("Transfers", [])
         )
+
+        # Filter out system addresses (zero address, CTF contracts) in Python
+        # since Bitquery V2 doesn't support {not: {in: [...]}} on Receiver.
+        _exclude = {
+            "0x0000000000000000000000000000000000000000",
+            POLYMARKET_CTF_ADDRESS.lower(),
+            POLYMARKET_NEGRISK_CTF.lower(),
+        }
 
         # Rank by frequency — most active buyers come first
         addr_counts: dict[str, int] = {}
         for t in transfers:
             receiver = t.get("Transfer", {}).get("Receiver", "")
-            if receiver and len(receiver) == 42 and receiver.startswith("0x"):
+            if (
+                receiver
+                and len(receiver) == 42
+                and receiver.startswith("0x")
+                and receiver.lower() not in _exclude
+            ):
                 addr_counts[receiver] = addr_counts.get(receiver, 0) + 1
 
         sorted_addrs = sorted(addr_counts, key=lambda a: addr_counts[a], reverse=True)
@@ -249,8 +258,9 @@ class BitqueryClient:
                     "offset": offset,
                 },
             )
+            data_node = page.get("data") or {}
             transfers = (
-                page.get("data", {})
+                data_node
                 .get("EVM", {})
                 .get("Transfers", [])
             )
