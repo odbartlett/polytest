@@ -121,6 +121,12 @@ class WhaleBot:
             self._scheduler.start()  # type: ignore[union-attr]
             logger.info("scheduler.started")
 
+            # Step 3b: Start HTTP monitor early so Railway health checks pass
+            # while the whitelist refresh (which can take 10-20 min) runs below.
+            monitor_port = int(os.getenv("PORT", "8080"))
+            self._monitor_task = asyncio.create_task(self._serve_monitor(monitor_port))
+            logger.info("monitor.started", port=monitor_port)
+
             # Step 4: Initial whitelist refresh
             logger.info("bot.initial_whitelist_refresh.starting")
             await self._whitelist_manager.refresh_whitelist()  # type: ignore[union-attr]
@@ -184,11 +190,6 @@ class WhaleBot:
                     )
                 )
                 logger.info("bot.running", mode=mode, wallet_count=len(wallet_addresses))
-
-            # Start monitoring dashboard (FastAPI on PORT env var, default 8080)
-            monitor_port = int(os.getenv("PORT", "8080"))
-            self._monitor_task = asyncio.create_task(self._serve_monitor(monitor_port))
-            logger.info("monitor.started", port=monitor_port)
 
             # Block until shutdown signal
             await self._shutdown_event.wait()
