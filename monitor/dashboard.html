@@ -356,6 +356,28 @@
     .badge-open   { background: rgba(59,130,246,0.15); color: var(--blue); }
     .badge-closed { background: rgba(107,114,128,0.15); color: var(--text-muted); }
 
+    .badge-copy    { background: rgba(59,130,246,0.2);  color: #93c5fd; }
+    .badge-micro   { background: rgba(139,92,246,0.2);  color: #c4b5fd; }
+    .badge-noflip  { background: rgba(245,158,11,0.2);  color: #fcd34d; }
+
+    /* Strategy section */
+    .strategy-section { margin-bottom: 20px; }
+    .strategy-header {
+      display: flex; align-items: center; justify-content: space-between;
+      flex-wrap: wrap; gap: 10px;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    .strategy-header-left { display: flex; align-items: center; gap: 12px; }
+    .strategy-name { font-size: 14px; font-weight: 700; }
+    .strategy-stats {
+      display: flex; gap: 20px; flex-wrap: wrap;
+      font-size: 12px; color: var(--text-muted);
+    }
+    .strategy-stat { display: flex; flex-direction: column; gap: 1px; align-items: flex-end; }
+    .strategy-stat-label { font-size: 10px; letter-spacing: 0.5px; text-transform: uppercase; }
+    .strategy-stat-val { font-size: 13px; font-weight: 700; }
+
     /* ── OPEN row blink ───────────────────────────────────────────────── */
     @keyframes openBlink {
       0%, 100% { opacity: 1; }
@@ -565,35 +587,90 @@
     </div>
   </div>
 
-  <!-- ── Positions Table ────────────────────────────────────────── -->
-  <div class="section-title">Positions</div>
-  <div class="positions-card">
-    <div class="positions-header">
-      <button class="tab-btn active" data-filter="all"  onclick="switchTab(this,'all')">All</button>
-      <button class="tab-btn"        data-filter="open"  onclick="switchTab(this,'open')">Open</button>
-      <button class="tab-btn"        data-filter="closed" onclick="switchTab(this,'closed')">Closed</button>
+  <!-- ── Strategy Tables ────────────────────────────────────────── -->
+  <div class="section-title">Positions by Strategy</div>
+
+  <!-- COPY -->
+  <div class="positions-card strategy-section" id="strat-COPY">
+    <div class="strategy-header">
+      <div class="strategy-header-left">
+        <span class="badge badge-copy" style="font-size:12px;padding:4px 12px">COPY</span>
+        <span class="strategy-name" style="color:var(--blue)">Copy Trades</span>
+      </div>
+      <div class="strategy-stats" id="strat-stats-COPY">
+        <div class="strategy-stat"><span class="strategy-stat-label">Open</span><span class="strategy-stat-val" id="ss-open-COPY">—</span></div>
+        <div class="strategy-stat"><span class="strategy-stat-label">Deployed</span><span class="strategy-stat-val" id="ss-deploy-COPY">—</span></div>
+        <div class="strategy-stat"><span class="strategy-stat-label">Realized P&amp;L</span><span class="strategy-stat-val" id="ss-rpnl-COPY">—</span></div>
+        <div class="strategy-stat"><span class="strategy-stat-label">Win Rate</span><span class="strategy-stat-val" id="ss-wr-COPY">—</span></div>
+      </div>
     </div>
     <div class="table-wrap">
-      <table id="pos-table">
-        <thead>
-          <tr>
-            <th>Market</th>
-            <th>Tier</th>
-            <th class="right">Size</th>
-            <th class="right">Entry</th>
-            <th class="right">Current</th>
-            <th class="right">P&amp;L ($)</th>
-            <th class="right">P&amp;L (%)</th>
-            <th>Status</th>
-            <th>Opened</th>
-            <th>Whale</th>
-          </tr>
-        </thead>
-        <tbody id="pos-tbody">
-          <tr><td colspan="10"><div class="skeleton sk-row"></div></td></tr>
-          <tr><td colspan="10"><div class="skeleton sk-row"></div></td></tr>
-          <tr><td colspan="10"><div class="skeleton sk-row"></div></td></tr>
-          <tr><td colspan="10"><div class="skeleton sk-row"></div></td></tr>
+      <table>
+        <thead><tr>
+          <th>Market</th><th>Tier</th>
+          <th class="right">Size</th><th class="right">Entry</th><th class="right">Current</th>
+          <th class="right">P&amp;L ($)</th><th class="right">P&amp;L (%)</th>
+          <th>Status</th><th>Opened</th>
+        </tr></thead>
+        <tbody id="pos-tbody-COPY">
+          <tr><td colspan="9"><div class="skeleton sk-row"></div></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- MICRO -->
+  <div class="positions-card strategy-section" id="strat-MICRO">
+    <div class="strategy-header">
+      <div class="strategy-header-left">
+        <span class="badge badge-micro" style="font-size:12px;padding:4px 12px">MICRO</span>
+        <span class="strategy-name" style="color:#c4b5fd">Micro Positions</span>
+      </div>
+      <div class="strategy-stats" id="strat-stats-MICRO">
+        <div class="strategy-stat"><span class="strategy-stat-label">Open</span><span class="strategy-stat-val" id="ss-open-MICRO">—</span></div>
+        <div class="strategy-stat"><span class="strategy-stat-label">Deployed</span><span class="strategy-stat-val" id="ss-deploy-MICRO">—</span></div>
+        <div class="strategy-stat"><span class="strategy-stat-label">Realized P&amp;L</span><span class="strategy-stat-val" id="ss-rpnl-MICRO">—</span></div>
+        <div class="strategy-stat"><span class="strategy-stat-label">Win Rate</span><span class="strategy-stat-val" id="ss-wr-MICRO">—</span></div>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Market</th><th>Tier</th>
+          <th class="right">Size</th><th class="right">Entry</th><th class="right">Current</th>
+          <th class="right">P&amp;L ($)</th><th class="right">P&amp;L (%)</th>
+          <th>Status</th><th>Opened</th>
+        </tr></thead>
+        <tbody id="pos-tbody-MICRO">
+          <tr><td colspan="9"><div class="skeleton sk-row"></div></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- NO_FLIP -->
+  <div class="positions-card strategy-section" id="strat-NO_FLIP">
+    <div class="strategy-header">
+      <div class="strategy-header-left">
+        <span class="badge badge-noflip" style="font-size:12px;padding:4px 12px">NO-FLIP</span>
+        <span class="strategy-name" style="color:var(--gold)">No-Flip (Mean Reversion)</span>
+      </div>
+      <div class="strategy-stats" id="strat-stats-NO_FLIP">
+        <div class="strategy-stat"><span class="strategy-stat-label">Open</span><span class="strategy-stat-val" id="ss-open-NO_FLIP">—</span></div>
+        <div class="strategy-stat"><span class="strategy-stat-label">Deployed</span><span class="strategy-stat-val" id="ss-deploy-NO_FLIP">—</span></div>
+        <div class="strategy-stat"><span class="strategy-stat-label">Realized P&amp;L</span><span class="strategy-stat-val" id="ss-rpnl-NO_FLIP">—</span></div>
+        <div class="strategy-stat"><span class="strategy-stat-label">Win Rate</span><span class="strategy-stat-val" id="ss-wr-NO_FLIP">—</span></div>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Market</th><th>Tier</th>
+          <th class="right">Size</th><th class="right">Entry</th><th class="right">Current</th>
+          <th class="right">P&amp;L ($)</th><th class="right">P&amp;L (%)</th>
+          <th>Status</th><th>Exit Reason</th><th>Opened</th>
+        </tr></thead>
+        <tbody id="pos-tbody-NO_FLIP">
           <tr><td colspan="10"><div class="skeleton sk-row"></div></td></tr>
         </tbody>
       </table>
@@ -897,12 +974,6 @@ function buildFunnelChart(gates) {
 }
 
 /* ============================================================
-   State
-   ============================================================ */
-let _positions  = [];
-let _activeFilter = 'all';
-
-/* ============================================================
    Render helpers
    ============================================================ */
 function renderStatus(status, metrics) {
@@ -942,38 +1013,53 @@ function renderStatus(status, metrics) {
   $('s-whitelist').textContent = (status.whitelist_count ?? 0).toLocaleString();
 }
 
-function renderPositions(positions, filter) {
-  const tbody = $('pos-tbody');
-  let rows = positions;
-  if (filter === 'open')   rows = positions.filter(p => p.status === 'OPEN');
-  if (filter === 'closed') rows = positions.filter(p => p.status === 'CLOSED');
+function posRow(p, includeExitReason) {
+  const isOpen  = p.status === 'OPEN';
+  const rowClass = p.pnl > 0 ? 'profit-row' : p.pnl < 0 ? 'loss-row' : '';
+  const dotHtml  = isOpen ? `<span class="open-dot"></span>` : '';
+  const statusHtml = isOpen
+    ? `<span class="badge badge-open">${dotHtml}OPEN</span>`
+    : `<span class="badge badge-closed">CLOSED</span>`;
+  const exitCell = includeExitReason
+    ? `<td style="color:var(--text-muted);font-size:11px">${escape(p.exit_reason || '—')}</td>` : '';
+  return `<tr class="${rowClass}">
+    <td><div class="cell-market" title="${escape(p.market)}">${escape(p.market)}</div></td>
+    <td>${tierBadge(p.tier)}</td>
+    <td class="right">${fmt$(p.size_usdc)}</td>
+    <td class="right">${p.entry_price != null ? p.entry_price.toFixed(4) : '—'}</td>
+    <td class="right">${p.current_price != null ? p.current_price.toFixed(4) : '—'}</td>
+    <td class="right ${pnlClass(p.pnl)}">${fmt$(p.pnl, true)}</td>
+    <td class="right ${pnlClass(p.roi_pct)}">${fmtPct(p.roi_pct, true)}</td>
+    <td>${statusHtml}</td>
+    ${exitCell}
+    <td style="color:var(--text-muted);font-size:11.5px">${formatDateShort(p.opened_at)}</td>
+  </tr>`;
+}
 
-  if (rows.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="10"><div class="empty-msg">No positions found</div></td></tr>`;
-    return;
-  }
+function renderStrategyTables(data) {
+  if (!data) return;
+  const strategies = ['COPY', 'MICRO', 'NO_FLIP'];
+  strategies.forEach(strat => {
+    const info = data[strat] || { open_count:0, closed_count:0, wins:0, win_rate:0, deployed_capital:0, realized_pnl:0, unrealized_pnl:0, total_pnl:0, positions:[] };
+    // Stats bar
+    $(`ss-open-${strat}`).textContent    = info.open_count;
+    const deployEl = $(`ss-deploy-${strat}`);
+    deployEl.textContent = fmt$(info.deployed_capital);
+    const rpnlEl = $(`ss-rpnl-${strat}`);
+    rpnlEl.textContent = fmt$(info.realized_pnl, true);
+    rpnlEl.className = 'strategy-stat-val ' + pnlClass(info.realized_pnl);
+    const wrEl = $(`ss-wr-${strat}`);
+    wrEl.textContent = fmtPct(info.win_rate) + ` (${info.wins}/${info.closed_count})`;
 
-  tbody.innerHTML = rows.map(p => {
-    const isOpen  = p.status === 'OPEN';
-    const rowClass = p.pnl > 0 ? 'profit-row' : p.pnl < 0 ? 'loss-row' : '';
-    const dotHtml  = isOpen ? `<span class="open-dot"></span>` : '';
-    const statusHtml = isOpen
-      ? `<span class="badge badge-open">${dotHtml}OPEN</span>`
-      : `<span class="badge badge-closed">CLOSED</span>`;
-
-    return `<tr class="${rowClass}">
-      <td><div class="cell-market" title="${escape(p.market)}">${escape(p.market)}</div></td>
-      <td>${tierBadge(p.tier)}</td>
-      <td class="right">${fmt$(p.size_usdc)}</td>
-      <td class="right">${p.entry_price != null ? p.entry_price.toFixed(4) : '—'}</td>
-      <td class="right">${p.current_price != null ? p.current_price.toFixed(4) : '—'}</td>
-      <td class="right ${pnlClass(p.pnl)}">${fmt$(p.pnl, true)}</td>
-      <td class="right ${pnlClass(p.roi_pct)}">${fmtPct(p.roi_pct, true)}</td>
-      <td>${statusHtml}</td>
-      <td style="color:var(--text-muted);font-size:11.5px">${formatDateShort(p.opened_at)}</td>
-      <td style="color:var(--text-dim);font-size:11.5px;font-family:monospace">${escape(p.whale || '—')}</td>
-    </tr>`;
-  }).join('');
+    // Positions tbody
+    const tbody = $(`pos-tbody-${strat}`);
+    const cols = strat === 'NO_FLIP' ? 10 : 9;
+    if (!info.positions || info.positions.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="${cols}"><div class="empty-msg">No ${strat} positions yet</div></td></tr>`;
+      return;
+    }
+    tbody.innerHTML = info.positions.map(p => posRow(p, strat === 'NO_FLIP')).join('');
+  });
 }
 
 function renderTierBreakdown(tiers) {
@@ -1026,16 +1112,6 @@ function renderWhaleLeaderboard(whales) {
 }
 
 /* ============================================================
-   Tab switching
-   ============================================================ */
-function switchTab(btn, filter) {
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  _activeFilter = filter;
-  renderPositions(_positions, filter);
-}
-
-/* ============================================================
    Data fetching
    ============================================================ */
 async function safeFetch(url) {
@@ -1050,10 +1126,10 @@ async function safeFetch(url) {
 }
 
 async function fetchAll() {
-  const [status, metrics, positions, snapshots, funnel, whitelist, tiers] = await Promise.all([
+  const [status, metrics, byStrategy, snapshots, funnel, whitelist, tiers] = await Promise.all([
     safeFetch('/api/status'),
     safeFetch('/api/metrics'),
-    safeFetch('/api/positions?status=all&limit=50'),
+    safeFetch('/api/positions/by-strategy?limit=100'),
     safeFetch('/api/snapshots?days=30'),
     safeFetch('/api/signals/funnel'),
     safeFetch('/api/whitelist?limit=20'),
@@ -1061,24 +1137,10 @@ async function fetchAll() {
   ]);
 
   // Status strip
-  if (status && metrics) {
-    renderStatus(status, metrics);
-  } else {
-    if (!status) {
-      ['s-bankroll','s-drawdown','s-whitelist'].forEach(id => {
-        if ($('s-bankroll').querySelector('.skeleton')) return;
-        $(id).innerHTML = '<span style="color:var(--text-muted);font-size:12px">Unavailable</span>';
-      });
-    }
-  }
+  if (status && metrics) renderStatus(status, metrics);
 
-  // Positions
-  if (positions) {
-    _positions = positions;
-    renderPositions(_positions, _activeFilter);
-  } else {
-    $('pos-tbody').innerHTML = `<tr><td colspan="10"><div class="unavailable">Data unavailable</div></td></tr>`;
-  }
+  // Strategy tables
+  renderStrategyTables(byStrategy);
 
   // Charts
   buildPnlChart(snapshots);

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import structlog
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from config.settings import get_settings
@@ -36,6 +37,22 @@ async def init_db() -> None:
     """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all, checkfirst=True)
+
+    # Idempotent column migrations — run on every startup, safe to re-run.
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "ALTER TABLE bot_positions ADD COLUMN IF NOT EXISTS "
+            "strategy VARCHAR(16) NOT NULL DEFAULT 'COPY'"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE bot_orders ADD COLUMN IF NOT EXISTS "
+            "strategy VARCHAR(16) NOT NULL DEFAULT 'COPY'"
+        ))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_bot_positions_strategy "
+            "ON bot_positions (strategy, status, is_simulated)"
+        ))
+
     logger.info("database.initialized", tables=list(Base.metadata.tables.keys()))
 
 

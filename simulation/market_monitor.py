@@ -102,17 +102,25 @@ class MarketMonitor:
                     unrealized_pnl=round(unrealized_pnl, 2),
                 )
 
-                # Stop-loss / take-profit check
+                # Strategy-specific and generic exit checks
                 if pos.size_usdc > 0:
                     pnl_pct = unrealized_pnl / pos.size_usdc
-                    stop_loss = -self._settings.SIM_STOP_LOSS_PCT
-                    take_profit = self._settings.SIM_TAKE_PROFIT_PCT
-                    if pnl_pct <= stop_loss:
-                        await self._force_close_position(pos, current_price, "STOP_LOSS")
-                        continue
-                    elif pnl_pct >= take_profit:
-                        await self._force_close_position(pos, current_price, "TAKE_PROFIT")
-                        continue
+
+                    # NO_FLIP has three dedicated exit conditions
+                    if getattr(pos, "strategy", "COPY") == "NO_FLIP":
+                        no_flip_exit = await self._check_no_flip_exit(pos, current_price, pnl_pct)
+                        if no_flip_exit:
+                            await self._force_close_position(pos, current_price, no_flip_exit)
+                            continue
+                    else:
+                        stop_loss = -self._settings.SIM_STOP_LOSS_PCT
+                        take_profit = self._settings.SIM_TAKE_PROFIT_PCT
+                        if pnl_pct <= stop_loss:
+                            await self._force_close_position(pos, current_price, "STOP_LOSS")
+                            continue
+                        elif pnl_pct >= take_profit:
+                            await self._force_close_position(pos, current_price, "TAKE_PROFIT")
+                            continue
 
                 # Time-based exit: close at 50% of elapsed position window if profitable.
                 # Resolution time is cached in Redis when the position is opened.
@@ -380,3 +388,108 @@ class MarketMonitor:
             )
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Fast exit check (60-second cadence for volatile positions)
+    # ------------------------------------------------------------------
+
+    async def fast_exit_check(self) -> int:
+        """Quick pass over volatile open positions — triggers exits without full mark.
+
+        Only re-prices positions with |unrealized_pnl_pct| >= 10% so the
+        60-second scheduler loop stays lightweight.
+
+        Returns number of positions force-closed.
+        """
+        positions = await self._fetch_open_positions()
+        closed = 0
+        for pos in positions:
+            if pos.size_usdc <= 0:
+                continue
+            # Only run fast check for positions that are already moving
+            last_pnl = pos.unrealized_pnl_usdc or 0.0
+            if abs(last_pnl / pos.size_usdc) < 0.10 and getattr(pos, "strategy", "COPY") != "NO_FLIP":
+                continue
+            try:
+                current_price = await self._get_mid_price(pos.token_id)
+                if current_price is None:
+                    continue
+                unrealized_pnl = (current_price - pos.entry_price) * pos.shares_held
+                pnl_pct = unrealized_pnl / pos.size_usdc
+
+                strategy = getattr(pos, "strategy", "COPY")
+                if strategy == "NO_FLIP":
+                    reason = await self._check_no_flip_exit(pos, current_price, pnl_pct)
+                    if reason:
+                        await self._force_close_position(pos, current_price, reason)
+                        closed += 1
+                        continue
+                else:
+                    if pnl_pct <= -self._settings.SIM_STOP_LOSS_PCT:
+                        await self._force_close_position(pos, current_price, "STOP_LOSS")
+                        closed += 1
+                    elif pnl_pct >= self._settings.SIM_TAKE_PROFIT_PCT:
+                        await self._force_close_position(pos, current_price, "TAKE_PROFIT")
+                        closed += 1
+            except Exception as exc:
+                logger.debug("market_monitor.fast_exit_check_failed", pos_id=pos.id, error=str(exc))
+
+        if closed:
+            logger.info("market_monitor.fast_exit_check.closed", count=closed)
+        return closed
+
+    async def _check_no_flip_exit(
+        self,
+        pos: BotPosition,
+        no_price: float,
+        pnl_pct: float,
+    ) -> Optional[str]:
+        """Return an exit reason string if a NO_FLIP position should be closed, else None.
+
+        Exit conditions (first match wins):
+          1. NO_FLIP_TAKE_PROFIT_PCT (+50%) — NO token moved in our favour.
+          2. Absolute stop-loss — NO price dropped below NO_FLIP_STOP_LOSS_PRICE ($0.02).
+          3. YES_REVERSION — YES price fell back from >0.90 to <NO_FLIP_YES_REVERSION_THRESHOLD.
+             This is the mean-reversion signal: the whale's price push has reversed.
+        """
+        settings = self._settings
+        # 1. Take profit
+        if pnl_pct >= settings.NO_FLIP_TAKE_PROFIT_PCT:
+            return "NO_FLIP_TAKE_PROFIT"
+
+        # 2. Absolute stop loss
+        if no_price <= settings.NO_FLIP_STOP_LOSS_PRICE:
+            return "NO_FLIP_STOP_LOSS"
+
+        # 3. YES reversion — only if we can fetch the YES price
+        yes_price = await self._get_yes_price_for_no_position(pos)
+        if yes_price is not None and yes_price < settings.NO_FLIP_YES_REVERSION_THRESHOLD:
+            logger.info(
+                "market_monitor.no_flip_yes_reversion",
+                position_id=pos.id,
+                yes_price=round(yes_price, 4),
+                threshold=settings.NO_FLIP_YES_REVERSION_THRESHOLD,
+            )
+            return "NO_FLIP_YES_REVERSION"
+
+        return None
+
+    async def _get_yes_price_for_no_position(self, pos: BotPosition) -> Optional[float]:
+        """Return the current mid-price of the paired YES token for a NO_FLIP position.
+
+        Fetches the market and finds the token whose token_id differs from pos.token_id.
+        Returns None if the market can't be fetched or has only one token.
+        """
+        try:
+            market = await self._clob.get_market(pos.market_id)
+            if not market.tokens or len(market.tokens) < 2:
+                return None
+            yes_token = next(
+                (t for t in market.tokens if t.token_id != pos.token_id), None
+            )
+            if yes_token is None:
+                return None
+            return await self._get_mid_price(yes_token.token_id)
+        except Exception as exc:
+            logger.debug("market_monitor.yes_price_lookup_failed", pos_id=pos.id, error=str(exc))
+            return None

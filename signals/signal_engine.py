@@ -74,6 +74,22 @@ def _extract_keywords(text: str) -> set[str]:
     return {w.strip("\"'()!.") for w in words if len(w) >= 4 and w not in _STOPWORDS}
 
 
+class SupplementalSignal(BaseModel):
+    """Secondary trading opportunity detected at a gate failure point.
+
+    Carried on a failed SignalDecision and dispatched separately so the
+    main copy-trade pipeline is unaffected.
+    """
+    strategy: str           # "MICRO" or "NO_FLIP"
+    token_id: str           # token to buy (NO token for NO_FLIP)
+    entry_price: float      # approximate price (whale-implied for NO_FLIP)
+    copy_size_usdc: float
+    whale_score: float
+    roi_score: float = 0.0
+    consistency_score: float = 0.0
+    original_yes_price: float = 0.0  # YES price that triggered NO_FLIP
+
+
 class SignalDecision(BaseModel):
     should_trade: bool
     copy_size_usdc: float
@@ -84,6 +100,7 @@ class SignalDecision(BaseModel):
     gate_failed: Optional[str] = None
     token_id: str = ""
     latency_ms: float = 0.0  # ms between whale trade timestamp and bot evaluation
+    supplemental: Optional[SupplementalSignal] = None  # MICRO or NO_FLIP opportunity
 
 
 # ---------------------------------------------------------------------------
@@ -170,8 +187,18 @@ class SignalEngine:
         # Only copy trades where the token price offers meaningful upside.
         # Tokens near $1.00 are already near-certain (no upside).
         # Tokens near $0.00 are near-impossible (no realistic upside either).
+        #
+        # When a whale buys YES at >MAX_ENTRY_PRICE, check for a NO_FLIP:
+        # the NO token is cheap and may revert if the certainty is overstated.
         # ----------------------------------------------------------------
         if not (self._settings.MIN_ENTRY_PRICE <= trade.price <= self._settings.MAX_ENTRY_PRICE):
+            supplemental = None
+            if trade.price > self._settings.MAX_ENTRY_PRICE:
+                # Score not yet computed — use synthetic score from size (same as MARKET_TRADE path)
+                min_size = self._settings.MIN_WHALE_TRADE_SIZE
+                size_ratio = trade.size_usdc / max(min_size, 1.0)
+                flip_score = min(85.0, 55.0 + (size_ratio - 1.0) * (30.0 / 9.0))
+                supplemental = await self._try_build_no_flip_signal(trade, flip_score)
             return SignalDecision(
                 should_trade=False,
                 copy_size_usdc=0.0,
@@ -181,6 +208,7 @@ class SignalEngine:
                 ),
                 whale_score=0.0,
                 gate_failed="PRICE_RANGE",
+                supplemental=supplemental,
             )
 
         # ----------------------------------------------------------------
@@ -293,6 +321,21 @@ class SignalEngine:
         copy_size = math.floor(copy_size / 10) * 10  # round down to nearest $10
 
         if available_depth < self._settings.MIN_COPY_SIZE:
+            # Check for MICRO opportunity if there's at least MICRO_MIN_DEPTH_USDC of depth
+            supplemental = None
+            if available_depth >= self._settings.MICRO_MIN_DEPTH_USDC:
+                micro_size = available_depth * self._settings.MAX_LIQUIDITY_CONSUMPTION_PCT
+                micro_size = min(micro_size, self._settings.MICRO_MAX_SIZE_USDC)
+                micro_size = max(math.floor(micro_size / 10) * 10, 10.0)
+                supplemental = SupplementalSignal(
+                    strategy="MICRO",
+                    token_id=trade.token_id,
+                    entry_price=trade.price,
+                    copy_size_usdc=micro_size,
+                    whale_score=whale_score,
+                    roi_score=roi_score,
+                    consistency_score=consistency_score,
+                )
             return SignalDecision(
                 should_trade=False,
                 copy_size_usdc=0.0,
@@ -302,6 +345,7 @@ class SignalEngine:
                 ),
                 whale_score=whale_score,
                 gate_failed="ORDERBOOK_DEPTH",
+                supplemental=supplemental,
             )
 
         if copy_size < self._settings.MIN_COPY_SIZE:
@@ -427,6 +471,62 @@ class SignalEngine:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    async def _try_build_no_flip_signal(
+        self,
+        trade: TradeEvent,
+        whale_score: float,
+    ) -> Optional[SupplementalSignal]:
+        """Build a NO_FLIP supplemental signal when whale bought YES at >MAX_ENTRY_PRICE.
+
+        The NO token is cheap (near 0) and may revert if the market's certainty
+        is overstated. Only triggers if the NO price is within [0.03, NO_FLIP_MAX_ENTRY_PRICE].
+        """
+        market = _market_cache.get(trade.market_id)
+        if market is None:
+            try:
+                market = await self._clob.get_market(trade.market_id)
+                _market_cache[trade.market_id] = market
+            except Exception:
+                return None
+
+        if len(market.tokens) < 2:
+            return None
+
+        no_token = next(
+            (t for t in market.tokens if t.token_id != trade.token_id), None
+        )
+        if no_token is None:
+            return None
+
+        no_price = round(1.0 - trade.price, 6)
+
+        # Only flip if the NO token is in a meaningful speculative range
+        if not (0.03 <= no_price <= self._settings.NO_FLIP_MAX_ENTRY_PRICE):
+            return None
+
+        # Size: fixed fraction of bankroll, capped, rounded to $10
+        bankroll = await self._get_bankroll()
+        no_flip_size = bankroll * self._settings.NO_FLIP_SIZE_PCT
+        no_flip_size = min(no_flip_size, self._settings.NO_FLIP_MAX_SIZE_USDC)
+        no_flip_size = max(math.floor(no_flip_size / 10) * 10, 10.0)
+
+        logger.debug(
+            "signal.no_flip_candidate",
+            market=trade.market_id,
+            yes_price=trade.price,
+            no_price=no_price,
+            no_token=no_token.token_id,
+            size=no_flip_size,
+        )
+        return SupplementalSignal(
+            strategy="NO_FLIP",
+            token_id=no_token.token_id,
+            entry_price=no_price,
+            copy_size_usdc=no_flip_size,
+            whale_score=whale_score,
+            original_yes_price=trade.price,
+        )
 
     async def _convert_sell_to_buy_no(self, trade: TradeEvent) -> Optional[TradeEvent]:
         """Convert a SELL YES signal to an equivalent BUY NO signal.

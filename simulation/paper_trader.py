@@ -114,12 +114,13 @@ class PaperTrader:
         signal: SignalDecision,
         market: Market,
         copied_from_wallet: str,
+        strategy: str = "COPY",
     ) -> ExecutionResult:
         """Simulate a buy and record the paper position.
 
         Returns early (no position opened) if:
           - No token data on the market
-          - An open position for the same market already exists (no doubling up)
+          - An open position for the same market+strategy already exists
           - Insufficient available cash
         """
         if not market.tokens:
@@ -127,17 +128,19 @@ class PaperTrader:
 
         # Serialize concurrent fills for the same market to prevent race-condition
         # duplicates (two trades arriving within milliseconds both see no open position).
-        if market.market_id not in self._market_locks:
-            self._market_locks[market.market_id] = asyncio.Lock()
+        lock_key = f"{market.market_id}:{strategy}"
+        if lock_key not in self._market_locks:
+            self._market_locks[lock_key] = asyncio.Lock()
 
-        async with self._market_locks[market.market_id]:
-            return await self._execute_locked(signal, market, copied_from_wallet)
+        async with self._market_locks[lock_key]:
+            return await self._execute_locked(signal, market, copied_from_wallet, strategy)
 
     async def _execute_locked(
         self,
         signal: SignalDecision,
         market: Market,
         copied_from_wallet: str,
+        strategy: str = "COPY",
     ) -> ExecutionResult:
         """Inner execute — called only while holding the per-market lock."""
         # Use the token the whale actually traded (from signal), not just tokens[0].
@@ -146,9 +149,10 @@ class PaperTrader:
         token_id = signal.token_id if signal.token_id else market.tokens[0].token_id
         token = next((t for t in market.tokens if t.token_id == token_id), market.tokens[0])
 
-        # --- Guard 1: no duplicate positions in the same market (any token) ---
-        # Check by market_id only — prevents holding both YES and NO simultaneously.
-        existing = await self._get_open_position(market.market_id)
+        # --- Guard 1: strategy-aware duplicate check ---
+        # COPY: block any open position in the market (prevents YES+NO simultaneously).
+        # MICRO/NO_FLIP: only block same-strategy positions in the same market.
+        existing = await self._get_open_position(market.market_id, strategy)
         if existing is not None:
             logger.info(
                 "paper_trader.duplicate_skipped",
@@ -229,6 +233,7 @@ class PaperTrader:
                     score_tier=tier,
                     status=PositionStatus.OPEN,
                     is_simulated=True,
+                    strategy=strategy,
                     current_price=fill_price,
                     unrealized_pnl_usdc=0.0,
                     last_marked_at=now,
@@ -250,6 +255,7 @@ class PaperTrader:
                     limit_price=fill_price,
                     size_usdc=signal.copy_size_usdc,
                     status=OrderStatus.FILLED,
+                    strategy=strategy,
                     placed_at=now,
                     filled_at=now,
                     fill_price=fill_price,
@@ -421,17 +427,24 @@ class PaperTrader:
             logger.warning("paper_trader.bankroll_deduct_failed", error=str(exc))
 
     async def _get_open_position(
-        self, market_id: str
+        self, market_id: str, strategy: str = "COPY"
     ) -> Optional[BotPosition]:
-        """Return an existing open position for this market (any token), or None."""
+        """Return an existing open position for this market, or None.
+
+        COPY strategy: blocks any open position in the market (prevents YES+NO).
+        MICRO/NO_FLIP: only blocks same-strategy positions in the same market.
+        """
         try:
             async with AsyncSessionLocal() as session:
+                filters = [
+                    BotPosition.market_id == market_id,
+                    BotPosition.status == PositionStatus.OPEN,
+                    BotPosition.is_simulated.is_(True),
+                ]
+                if strategy != "COPY":
+                    filters.append(BotPosition.strategy == strategy)
                 result = await session.execute(
-                    select(BotPosition).where(
-                        BotPosition.market_id == market_id,
-                        BotPosition.status == PositionStatus.OPEN,
-                        BotPosition.is_simulated.is_(True),
-                    ).limit(1)
+                    select(BotPosition).where(*filters).limit(1)
                 )
                 return result.scalar_one_or_none()
         except Exception as exc:

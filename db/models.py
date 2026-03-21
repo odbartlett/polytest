@@ -48,6 +48,12 @@ class OrderStatus(str, enum.Enum):
     EXPIRED = "EXPIRED"
 
 
+class StrategyType(str, enum.Enum):
+    COPY = "COPY"        # Standard copy-trade following a whale
+    MICRO = "MICRO"      # Micro-position on thin-book markets ($10 fixed)
+    NO_FLIP = "NO_FLIP"  # Contrarian NO-token buy when whale pushes YES >0.90
+
+
 # Reusable SQLAlchemy Enum instances with names that match the SQL migrations.
 # Using shared instances ensures consistent type names across all columns.
 _SideEnumType = Enum(SideEnum, name="side_enum")
@@ -152,6 +158,7 @@ class BotPosition(Base):
         _PositionStatusType, nullable=False, default=PositionStatus.OPEN, index=True
     )
     is_simulated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    strategy: Mapped[str] = mapped_column(String(16), nullable=False, default="COPY", index=True)
     # Mark-to-market (updated periodically for open positions)
     current_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     unrealized_pnl_usdc: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -194,6 +201,7 @@ class BotOrder(Base):
     status: Mapped[OrderStatus] = mapped_column(
         _OrderStatusType, nullable=False, default=OrderStatus.PENDING, index=True
     )
+    strategy: Mapped[str] = mapped_column(String(16), nullable=False, default="COPY")
     placed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     filled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     fill_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

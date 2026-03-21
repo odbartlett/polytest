@@ -48,8 +48,9 @@ def register_jobs(
     paper_trader: "PaperTrader | None" = None,
     performance_tracker: "PerformanceTracker | None" = None,
     market_monitor: "MarketMonitor | None" = None,
-    sim_mark_interval_minutes: int = 15,
+    sim_mark_interval_minutes: int = 2,
     sim_report_interval_hours: int = 6,
+    fast_check_interval_seconds: int = 60,
 ) -> None:
     """Register all scheduled jobs on the given scheduler.
 
@@ -83,6 +84,7 @@ def register_jobs(
             market_monitor=market_monitor,
             mark_interval_minutes=sim_mark_interval_minutes,
             report_interval_hours=sim_report_interval_hours,
+            fast_check_interval_seconds=fast_check_interval_seconds,
         )
     else:
         _register_live_jobs(
@@ -162,8 +164,19 @@ def _register_sim_jobs(
     market_monitor: "MarketMonitor | None",
     mark_interval_minutes: int,
     report_interval_hours: int,
+    fast_check_interval_seconds: int = 60,
 ) -> None:
     """Register simulation-mode scheduler jobs."""
+
+    # Fast exit check — every 60 seconds (volatile positions and NO_FLIP only)
+    scheduler.add_job(
+        func=_sim_fast_exit_check_job,
+        trigger=IntervalTrigger(seconds=fast_check_interval_seconds),
+        id="sim_fast_exit_check",
+        name="Sim fast exit check",
+        replace_existing=True,
+        kwargs={"market_monitor": market_monitor},
+    )
 
     # Mark-to-market — every SIM_MARK_INTERVAL_MINUTES
     scheduler.add_job(
@@ -335,6 +348,14 @@ async def _stale_order_cleanup_job(order_executor: "OrderExecutor") -> None:
 # ---------------------------------------------------------------------------
 # Simulation-mode job implementations
 # ---------------------------------------------------------------------------
+
+
+async def _sim_fast_exit_check_job(market_monitor: "MarketMonitor") -> None:
+    """Quick exit check for volatile and NO_FLIP positions (60-second cadence)."""
+    try:
+        await market_monitor.fast_exit_check()
+    except Exception as exc:
+        logger.error("job.sim_fast_exit_check.failed", error=str(exc))
 
 
 async def _sim_mark_to_market_job(

@@ -178,8 +178,9 @@ async def get_positions(limit: int = 50, status: str = "all") -> JSONResponse:
                 entry_price, current_price, exit_price,
                 size_usdc, shares_held,
                 realized_pnl_usdc, unrealized_pnl_usdc,
-                status, opened_at, closed_at,
-                copied_from_wallet, whale_score_at_entry
+                status, strategy, opened_at, closed_at,
+                copied_from_wallet, whale_score_at_entry,
+                exit_reason
             FROM bot_positions
             {where}
             ORDER BY opened_at DESC
@@ -196,18 +197,102 @@ async def get_positions(limit: int = 50, status: str = "all") -> JSONResponse:
                 "id": r["id"],
                 "market": r["market_question"] or r["market_id"],
                 "tier": r["score_tier"] or "?",
+                "strategy": r["strategy"] or "COPY",
                 "entry_price": round(entry, 4),
                 "current_price": round(current, 4),
                 "size_usdc": round(float(r["size_usdc"] or 0), 2),
                 "pnl": round(pnl, 2),
                 "roi_pct": round(roi_pct, 1),
                 "status": r["status"],
+                "exit_reason": r["exit_reason"],
                 "opened_at": r["opened_at"].isoformat() if r["opened_at"] else None,
                 "closed_at": r["closed_at"].isoformat() if r["closed_at"] else None,
                 "whale": f"{wallet[:6]}…{wallet[-4:]}" if len(wallet) > 10 else wallet,
                 "whale_score": round(float(r["whale_score_at_entry"] or 0), 1),
             })
     return JSONResponse(positions)
+
+
+@app.get("/api/positions/by-strategy")
+async def get_positions_by_strategy(limit: int = 50) -> JSONResponse:
+    """Positions and summary stats grouped by strategy (COPY, MICRO, NO_FLIP)."""
+    async with _SessionLocal() as session:
+        # Per-strategy summary
+        summary_rows = await session.execute(text("""
+            SELECT
+                COALESCE(strategy, 'COPY') AS strategy,
+                COUNT(*) FILTER (WHERE status = 'OPEN')             AS open_count,
+                COUNT(*) FILTER (WHERE status = 'CLOSED')           AS closed_count,
+                COUNT(*) FILTER (WHERE status = 'CLOSED' AND realized_pnl_usdc > 0) AS wins,
+                COALESCE(SUM(size_usdc) FILTER (WHERE status = 'OPEN'), 0) AS deployed,
+                COALESCE(SUM(realized_pnl_usdc) FILTER (WHERE status = 'CLOSED'), 0) AS realized_pnl,
+                COALESCE(SUM(unrealized_pnl_usdc) FILTER (WHERE status = 'OPEN'), 0) AS unrealized_pnl
+            FROM bot_positions
+            WHERE is_simulated = TRUE
+            GROUP BY strategy
+        """))
+        summaries: dict[str, Any] = {}
+        for r in summary_rows.mappings():
+            strat = r["strategy"]
+            closed = int(r["closed_count"])
+            wins = int(r["wins"])
+            summaries[strat] = {
+                "open_count": int(r["open_count"]),
+                "closed_count": closed,
+                "wins": wins,
+                "win_rate": round(wins / closed * 100, 1) if closed > 0 else 0.0,
+                "deployed_capital": round(float(r["deployed"]), 2),
+                "realized_pnl": round(float(r["realized_pnl"]), 2),
+                "unrealized_pnl": round(float(r["unrealized_pnl"]), 2),
+                "total_pnl": round(float(r["realized_pnl"]) + float(r["unrealized_pnl"]), 2),
+                "positions": [],
+            }
+
+        # Recent positions per strategy
+        pos_rows = await session.execute(text("""
+            SELECT
+                id, market_question, market_id, score_tier,
+                entry_price, current_price, exit_price,
+                size_usdc, realized_pnl_usdc, unrealized_pnl_usdc,
+                status, strategy, opened_at, closed_at,
+                copied_from_wallet, whale_score_at_entry, exit_reason
+            FROM bot_positions
+            WHERE is_simulated = TRUE
+            ORDER BY opened_at DESC
+            LIMIT :limit
+        """), {"limit": limit})
+        for r in pos_rows.mappings():
+            strat = r["strategy"] or "COPY"
+            pnl = float(r["realized_pnl_usdc"] or r["unrealized_pnl_usdc"] or 0)
+            entry = float(r["entry_price"] or 0)
+            current = float(r["current_price"] or r["exit_price"] or entry)
+            roi_pct = ((current - entry) / entry * 100) if entry > 0 else 0.0
+            wallet = r["copied_from_wallet"] or ""
+            row = {
+                "id": r["id"],
+                "market": r["market_question"] or r["market_id"],
+                "tier": r["score_tier"] or "?",
+                "entry_price": round(entry, 4),
+                "current_price": round(current, 4),
+                "size_usdc": round(float(r["size_usdc"] or 0), 2),
+                "pnl": round(pnl, 2),
+                "roi_pct": round(roi_pct, 1),
+                "status": r["status"],
+                "exit_reason": r["exit_reason"],
+                "opened_at": r["opened_at"].isoformat() if r["opened_at"] else None,
+                "closed_at": r["closed_at"].isoformat() if r["closed_at"] else None,
+                "whale": f"{wallet[:6]}…{wallet[-4:]}" if len(wallet) > 10 else wallet,
+                "whale_score": round(float(r["whale_score_at_entry"] or 0), 1),
+            }
+            if strat not in summaries:
+                summaries[strat] = {
+                    "open_count": 0, "closed_count": 0, "wins": 0, "win_rate": 0.0,
+                    "deployed_capital": 0.0, "realized_pnl": 0.0, "unrealized_pnl": 0.0,
+                    "total_pnl": 0.0, "positions": [],
+                }
+            summaries[strat]["positions"].append(row)
+
+    return JSONResponse(summaries)
 
 
 @app.get("/api/snapshots")

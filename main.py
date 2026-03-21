@@ -249,7 +249,7 @@ class WhaleBot:
             if signal.latency_ms > 0:
                 asyncio.create_task(self._cache_latency(signal.latency_ms))
 
-            # 3. Gate rejection — log and exit early
+            # 3. Gate rejection — log and exit early, but check for supplemental signals
             if not signal.should_trade:
                 asyncio.create_task(_persist_signal_event(trade, signal, exec_gate_failed=None))
                 logger.info("pipeline.signal_rejected", reason=signal.reason, gate=signal.gate_failed)
@@ -262,6 +262,9 @@ class WhaleBot:
                         )
                     except Exception:
                         pass
+                # Dispatch supplemental strategy if gate produced one (MICRO or NO_FLIP)
+                if signal.supplemental is not None and self._settings.SIMULATION_MODE:
+                    asyncio.create_task(self._process_supplemental_signal(trade, signal))
                 return
 
             # 4. Fetch market metadata (use shared cache to avoid duplicate CLOB calls)
@@ -290,6 +293,7 @@ class WhaleBot:
                     signal=signal,
                     market=market,
                     copied_from_wallet=trade.wallet_address,
+                    strategy="COPY",
                 )
             else:
                 assert self._order_executor is not None
@@ -328,6 +332,58 @@ class WhaleBot:
                     await self._alerter.error_alert("pipeline", f"{type(exc).__name__}: {exc}")
                 except Exception:
                     pass
+
+    async def _process_supplemental_signal(
+        self,
+        trade: TradeEvent,
+        parent_signal: "SignalDecision",
+    ) -> None:
+        """Execute a MICRO or NO_FLIP position when the primary signal was rejected.
+
+        The SupplementalSignal carries its own token_id, size, and entry_price
+        so PaperTrader can treat it like any other signal.
+        """
+        from signals.signal_engine import SignalDecision as _SD
+
+        sup = parent_signal.supplemental
+        if sup is None or self._paper_trader is None:
+            return
+
+        # Build a minimal SignalDecision to reuse PaperTrader.execute()
+        syn_signal = _SD(
+            should_trade=True,
+            reason=f"{sup.strategy} supplemental",
+            whale_score=sup.whale_score,
+            token_id=sup.token_id,
+            copy_size_usdc=sup.copy_size_usdc,
+            roi_score=sup.roi_score,
+            consistency_score=sup.consistency_score,
+            latency_ms=0.0,
+        )
+
+        try:
+            from signals.signal_engine import _market_cache
+            assert self._clob_client is not None
+            market = _market_cache.get(trade.market_id)
+            if market is None:
+                market = await self._clob_client.get_market(trade.market_id)
+                _market_cache[trade.market_id] = market
+
+            result = await self._paper_trader.execute(
+                signal=syn_signal,
+                market=market,
+                copied_from_wallet=trade.wallet_address,
+                strategy=sup.strategy,
+            )
+            logger.info(
+                "pipeline.supplemental_executed",
+                strategy=sup.strategy,
+                success=result.success,
+                position_id=result.position_id,
+                gate_failed=result.gate_failed,
+            )
+        except Exception as exc:
+            logger.warning("pipeline.supplemental_failed", strategy=sup.strategy, error=str(exc))
 
     # ------------------------------------------------------------------
     # Service construction
@@ -417,6 +473,7 @@ class WhaleBot:
             market_monitor=self._market_monitor,
             sim_mark_interval_minutes=settings.SIM_MARK_INTERVAL_MINUTES,
             sim_report_interval_hours=settings.SIM_REPORT_INTERVAL_HOURS,
+            fast_check_interval_seconds=settings.SIM_FAST_CHECK_INTERVAL_SECONDS,
         )
 
     async def _build_live_services(self) -> None:

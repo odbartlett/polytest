@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     SIM_FILL_SLIPPAGE: float = 0.001
 
     # How often (minutes) to mark open positions to market
-    SIM_MARK_INTERVAL_MINUTES: int = 15
+    SIM_MARK_INTERVAL_MINUTES: int = 2
 
     # How often (hours) to send a performance report to Telegram
     SIM_REPORT_INTERVAL_HOURS: int = 6
@@ -110,6 +110,27 @@ class Settings(BaseSettings):
     MAX_HOURS_TO_RESOLUTION: int = 999999   # effectively unlimited — time-based exit handles long-dated positions
     SIM_STOP_LOSS_PCT: float = 0.30       # auto-close position if unrealized loss > 30%
     SIM_TAKE_PROFIT_PCT: float = 0.50     # auto-close position if unrealized gain > 50%
+
+    # -------------------------------------------------------------------------
+    # NO_FLIP strategy — contrarian NO-token buy when whale pushes YES >0.90
+    # -------------------------------------------------------------------------
+    NO_FLIP_MAX_ENTRY_PRICE: float = 0.20   # only enter if NO token price ≤ this
+    NO_FLIP_SIZE_PCT: float = 0.005         # 0.5% of bankroll per NO_FLIP position
+    NO_FLIP_MAX_SIZE_USDC: float = 100.0    # hard cap per NO_FLIP position
+    NO_FLIP_TAKE_PROFIT_PCT: float = 0.50   # close when NO price rises 50% from entry
+    NO_FLIP_STOP_LOSS_PRICE: float = 0.02   # close if NO price falls below $0.02
+    NO_FLIP_YES_REVERSION_THRESHOLD: float = 0.80  # YES must fall below this to trigger YES_REVERSION exit
+
+    # -------------------------------------------------------------------------
+    # MICRO strategy — small fixed-size positions on thin-book markets
+    # -------------------------------------------------------------------------
+    MICRO_MIN_DEPTH_USDC: float = 10.0  # minimum orderbook depth to trigger a MICRO position
+    MICRO_MAX_SIZE_USDC: float = 40.0   # hard cap per MICRO position (rounded to $10)
+
+    # -------------------------------------------------------------------------
+    # Mark-to-market frequency
+    # -------------------------------------------------------------------------
+    SIM_FAST_CHECK_INTERVAL_SECONDS: int = 60  # fast exit check for volatile positions
 
     # -------------------------------------------------------------------------
     # Scoring thresholds
