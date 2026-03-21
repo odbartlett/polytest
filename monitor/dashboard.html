@@ -610,10 +610,10 @@
           <th>Market</th><th>Tier</th>
           <th class="right">Size</th><th class="right">Entry</th><th class="right">Current</th>
           <th class="right">P&amp;L ($)</th><th class="right">P&amp;L (%)</th>
-          <th>Status</th><th>Opened</th>
+          <th>Status</th><th>Whale</th><th>Time to Res.</th><th>Opened</th>
         </tr></thead>
         <tbody id="pos-tbody-COPY">
-          <tr><td colspan="9"><div class="skeleton sk-row"></div></td></tr>
+          <tr><td colspan="11"><div class="skeleton sk-row"></div></td></tr>
         </tbody>
       </table>
     </div>
@@ -639,10 +639,10 @@
           <th>Market</th><th>Tier</th>
           <th class="right">Size</th><th class="right">Entry</th><th class="right">Current</th>
           <th class="right">P&amp;L ($)</th><th class="right">P&amp;L (%)</th>
-          <th>Status</th><th>Opened</th>
+          <th>Status</th><th>Whale</th><th>Time to Res.</th><th>Opened</th>
         </tr></thead>
         <tbody id="pos-tbody-MICRO">
-          <tr><td colspan="9"><div class="skeleton sk-row"></div></td></tr>
+          <tr><td colspan="11"><div class="skeleton sk-row"></div></td></tr>
         </tbody>
       </table>
     </div>
@@ -668,10 +668,10 @@
           <th>Market</th><th>Tier</th>
           <th class="right">Size</th><th class="right">Entry</th><th class="right">Current</th>
           <th class="right">P&amp;L ($)</th><th class="right">P&amp;L (%)</th>
-          <th>Status</th><th>Exit Reason</th><th>Opened</th>
+          <th>Status</th><th>Exit Reason</th><th>Whale</th><th>Time to Res.</th><th>Opened</th>
         </tr></thead>
         <tbody id="pos-tbody-NO_FLIP">
-          <tr><td colspan="10"><div class="skeleton sk-row"></div></td></tr>
+          <tr><td colspan="12"><div class="skeleton sk-row"></div></td></tr>
         </tbody>
       </table>
     </div>
@@ -1013,6 +1013,23 @@ function renderStatus(status, metrics) {
   $('s-whitelist').textContent = (status.whitelist_count ?? 0).toLocaleString();
 }
 
+function fmtTTR(hours) {
+  if (hours == null) return '—';
+  if (hours <= 0) return '<span style="color:var(--red);font-size:10px;font-weight:600">EXPIRED</span>';
+  if (hours < 1) {
+    const m = Math.round(hours * 60);
+    return `<span style="color:var(--gold)">${m}m</span>`;
+  }
+  if (hours < 24) {
+    const h = Math.floor(hours);
+    const m = Math.round((hours - h) * 60);
+    return `<span style="color:var(--gold)">${h}h ${m}m</span>`;
+  }
+  const d = Math.floor(hours / 24);
+  const h = Math.floor(hours % 24);
+  return `${d}d ${h}h`;
+}
+
 function posRow(p, includeExitReason) {
   const isOpen  = p.status === 'OPEN';
   const rowClass = p.pnl > 0 ? 'profit-row' : p.pnl < 0 ? 'loss-row' : '';
@@ -1022,6 +1039,9 @@ function posRow(p, includeExitReason) {
     : `<span class="badge badge-closed">CLOSED</span>`;
   const exitCell = includeExitReason
     ? `<td style="color:var(--text-muted);font-size:11px">${escape(p.exit_reason || '—')}</td>` : '';
+  const whaleDisp = p.whale && p.whale !== '—' ? p.whale : '—';
+  const whaleCell = `<td style="color:var(--text-dim);font-family:monospace;font-size:11px">${escape(whaleDisp)}</td>`;
+  const ttrCell = `<td style="font-size:11.5px">${fmtTTR(isOpen ? p.hours_to_resolution : null)}</td>`;
   return `<tr class="${rowClass}">
     <td><div class="cell-market" title="${escape(p.market)}">${escape(p.market)}</div></td>
     <td>${tierBadge(p.tier)}</td>
@@ -1032,6 +1052,8 @@ function posRow(p, includeExitReason) {
     <td class="right ${pnlClass(p.roi_pct)}">${fmtPct(p.roi_pct, true)}</td>
     <td>${statusHtml}</td>
     ${exitCell}
+    ${whaleCell}
+    ${ttrCell}
     <td style="color:var(--text-muted);font-size:11.5px">${formatDateShort(p.opened_at)}</td>
   </tr>`;
 }
@@ -1053,7 +1075,7 @@ function renderStrategyTables(data) {
 
     // Positions tbody
     const tbody = $(`pos-tbody-${strat}`);
-    const cols = strat === 'NO_FLIP' ? 10 : 9;
+    const cols = strat === 'NO_FLIP' ? 12 : 11;
     if (!info.positions || info.positions.length === 0) {
       tbody.innerHTML = `<tr><td colspan="${cols}"><div class="empty-msg">No ${strat} positions yet</div></td></tr>`;
       return;

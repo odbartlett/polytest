@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     NO_FLIP_MAX_SIZE_USDC: float = 100.0    # hard cap per NO_FLIP position
     NO_FLIP_TAKE_PROFIT_PCT: float = 0.50   # close when NO price rises 50% from entry
     NO_FLIP_STOP_LOSS_PRICE: float = 0.02   # close if NO price falls below $0.02
-    NO_FLIP_YES_REVERSION_THRESHOLD: float = 0.80  # YES must fall below this to trigger YES_REVERSION exit
+    NO_FLIP_YES_REVERSION_THRESHOLD: float = 0.85  # YES must fall below this to trigger YES_REVERSION exit
 
     # -------------------------------------------------------------------------
     # MICRO strategy — small fixed-size positions on thin-book markets

@@ -7,10 +7,13 @@ Access at: http://localhost:8080
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import aiohttp
 
 import redis.asyncio as aioredis
 import structlog
@@ -41,6 +44,74 @@ async def _get_redis() -> aioredis.Redis:  # type: ignore[type-arg]
     if _redis is None:
         _redis = aioredis.from_url(_settings.REDIS_URL, decode_responses=True, socket_timeout=3)
     return _redis
+
+
+# ---------------------------------------------------------------------------
+# Live price + resolution time helpers
+# ---------------------------------------------------------------------------
+
+_CLOB_HOST = "https://clob.polymarket.com"
+
+
+async def _fetch_live_mid_prices(token_ids: list[str]) -> dict[str, float]:
+    """Fetch current mid-prices from the public CLOB orderbook (no auth needed)."""
+    if not token_ids:
+        return {}
+
+    async def _one(session: aiohttp.ClientSession, tid: str) -> tuple[str, float | None]:
+        try:
+            async with session.get(
+                f"{_CLOB_HOST}/book",
+                params={"token_id": tid},
+                timeout=aiohttp.ClientTimeout(total=3),
+            ) as resp:
+                if resp.status != 200:
+                    return tid, None
+                data = await resp.json(content_type=None)
+                bids = sorted(data.get("bids", []), key=lambda x: -float(x.get("price", 0)))
+                asks = sorted(data.get("asks", []), key=lambda x: float(x.get("price", 0)))
+                if bids and asks:
+                    return tid, round((float(bids[0]["price"]) + float(asks[0]["price"])) / 2, 4)
+                if bids:
+                    return tid, round(float(bids[0]["price"]), 4)
+                if asks:
+                    return tid, round(float(asks[0]["price"]), 4)
+                return tid, None
+        except Exception:
+            return tid, None
+
+    connector = aiohttp.TCPConnector(limit=10)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        results = await asyncio.gather(*[_one(session, tid) for tid in token_ids])
+    return {tid: price for tid, price in results if price is not None}
+
+
+async def _fetch_resolution_times(position_ids: list[int]) -> dict[int, str | None]:
+    """Fetch resolution times cached in Redis by PaperTrader when positions were opened."""
+    if not position_ids:
+        return {}
+    try:
+        redis = await _get_redis()
+        pipe = redis.pipeline()
+        for pid in position_ids:
+            pipe.get(f"pos:{pid}:resolution_time")
+        results = await pipe.execute()
+        return dict(zip(position_ids, results))
+    except Exception:
+        return {}
+
+
+def _hours_to_resolution(rt_str: str | None) -> float | None:
+    if not rt_str:
+        return None
+    try:
+        rt = datetime.fromisoformat(str(rt_str).replace("Z", "+00:00"))
+        if rt.tzinfo is None:
+            rt = rt.replace(tzinfo=timezone.utc)
+        delta = rt - datetime.now(tz=timezone.utc)
+        return round(max(0.0, delta.total_seconds() / 3600), 1)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +286,11 @@ async def get_positions(limit: int = 50, status: str = "all") -> JSONResponse:
 
 @app.get("/api/positions/by-strategy")
 async def get_positions_by_strategy(limit: int = 50) -> JSONResponse:
-    """Positions and summary stats grouped by strategy (COPY, MICRO, NO_FLIP)."""
+    """Positions and summary stats grouped by strategy (COPY, MICRO, NO_FLIP).
+
+    Open positions have their current_price refreshed from the live CLOB orderbook
+    on every call. Resolution time is fetched from Redis (cached by PaperTrader).
+    """
     async with _SessionLocal() as session:
         # Per-strategy summary
         summary_rows = await session.execute(text("""
@@ -248,12 +323,12 @@ async def get_positions_by_strategy(limit: int = 50) -> JSONResponse:
                 "positions": [],
             }
 
-        # Recent positions per strategy
+        # Fetch positions including token_id and shares_held for live price calc
         pos_rows = await session.execute(text("""
             SELECT
-                id, market_question, market_id, score_tier,
+                id, market_question, market_id, token_id, score_tier,
                 entry_price, current_price, exit_price,
-                size_usdc, realized_pnl_usdc, unrealized_pnl_usdc,
+                size_usdc, shares_held, realized_pnl_usdc, unrealized_pnl_usdc,
                 status, strategy, opened_at, closed_at,
                 copied_from_wallet, whale_score_at_entry, exit_reason
             FROM bot_positions
@@ -261,36 +336,70 @@ async def get_positions_by_strategy(limit: int = 50) -> JSONResponse:
             ORDER BY opened_at DESC
             LIMIT :limit
         """), {"limit": limit})
-        for r in pos_rows.mappings():
-            strat = r["strategy"] or "COPY"
-            pnl = float(r["realized_pnl_usdc"] or r["unrealized_pnl_usdc"] or 0)
-            entry = float(r["entry_price"] or 0)
+        raw_rows = [dict(r) for r in pos_rows.mappings()]
+
+    # Collect open position token_ids and ids for live enrichment
+    open_entries = [
+        (r["id"], r["token_id"])
+        for r in raw_rows
+        if r["status"] == "OPEN" and r["token_id"]
+    ]
+    open_pos_ids = [e[0] for e in open_entries]
+    open_token_ids = list({e[1] for e in open_entries})
+
+    # Fetch live prices + resolution times concurrently
+    live_prices, resolution_times = await asyncio.gather(
+        _fetch_live_mid_prices(open_token_ids),
+        _fetch_resolution_times(open_pos_ids),
+    )
+
+    # Build final position rows
+    for r in raw_rows:
+        strat = r["strategy"] or "COPY"
+        entry = float(r["entry_price"] or 0)
+        status = r["status"]
+        token_id = r["token_id"] or ""
+        wallet = r["copied_from_wallet"] or ""
+        pos_id = r["id"]
+
+        # Use live CLOB price for open positions; fall back to DB value
+        if status == "OPEN" and token_id in live_prices:
+            current = live_prices[token_id]
+            shares = float(r["shares_held"] or 0)
+            pnl = round((current - entry) * shares, 2)
+        else:
             current = float(r["current_price"] or r["exit_price"] or entry)
-            roi_pct = ((current - entry) / entry * 100) if entry > 0 else 0.0
-            wallet = r["copied_from_wallet"] or ""
-            row = {
-                "id": r["id"],
-                "market": r["market_question"] or r["market_id"],
-                "tier": r["score_tier"] or "?",
-                "entry_price": round(entry, 4),
-                "current_price": round(current, 4),
-                "size_usdc": round(float(r["size_usdc"] or 0), 2),
-                "pnl": round(pnl, 2),
-                "roi_pct": round(roi_pct, 1),
-                "status": r["status"],
-                "exit_reason": r["exit_reason"],
-                "opened_at": r["opened_at"].isoformat() if r["opened_at"] else None,
-                "closed_at": r["closed_at"].isoformat() if r["closed_at"] else None,
-                "whale": f"{wallet[:6]}…{wallet[-4:]}" if len(wallet) > 10 else wallet,
-                "whale_score": round(float(r["whale_score_at_entry"] or 0), 1),
+            pnl = round(float(r["realized_pnl_usdc"] or r["unrealized_pnl_usdc"] or 0), 2)
+
+        roi_pct = round((current - entry) / entry * 100, 1) if entry > 0 else 0.0
+
+        row = {
+            "id": pos_id,
+            "market": r["market_question"] or r["market_id"],
+            "tier": r["score_tier"] or "?",
+            "entry_price": round(entry, 4),
+            "current_price": round(current, 4),
+            "size_usdc": round(float(r["size_usdc"] or 0), 2),
+            "pnl": pnl,
+            "roi_pct": roi_pct,
+            "status": status,
+            "exit_reason": r["exit_reason"],
+            "opened_at": r["opened_at"].isoformat() if r["opened_at"] else None,
+            "closed_at": r["closed_at"].isoformat() if r["closed_at"] else None,
+            "whale": f"{wallet[:6]}…{wallet[-4:]}" if len(wallet) > 10 else (wallet or "—"),
+            "whale_score": round(float(r["whale_score_at_entry"] or 0), 1),
+            "hours_to_resolution": (
+                _hours_to_resolution(resolution_times.get(pos_id))
+                if status == "OPEN" else None
+            ),
+        }
+        if strat not in summaries:
+            summaries[strat] = {
+                "open_count": 0, "closed_count": 0, "wins": 0, "win_rate": 0.0,
+                "deployed_capital": 0.0, "realized_pnl": 0.0, "unrealized_pnl": 0.0,
+                "total_pnl": 0.0, "positions": [],
             }
-            if strat not in summaries:
-                summaries[strat] = {
-                    "open_count": 0, "closed_count": 0, "wins": 0, "win_rate": 0.0,
-                    "deployed_capital": 0.0, "realized_pnl": 0.0, "unrealized_pnl": 0.0,
-                    "total_pnl": 0.0, "positions": [],
-                }
-            summaries[strat]["positions"].append(row)
+        summaries[strat]["positions"].append(row)
 
     return JSONResponse(summaries)
 

@@ -40,6 +40,8 @@ WebSocket (public market or private user channel)
                        OR OrderExecutor.execute() — live: CLOB order
                     4. DB persistence (signal_events, bot_positions, trades)
                     5. TelegramAlerter alerts
+                    6. If gate rejected + supplemental signal: asyncio.create_task
+                       dispatches MICRO or NO_FLIP secondary position
 ```
 
 ### Service graph
@@ -47,13 +49,13 @@ WebSocket (public market or private user channel)
 | Service | File | Purpose |
 |---|---|---|
 | `WhaleBot` | `main.py` | Orchestrator, wires everything |
-| `SignalEngine` | `signals/signal_engine.py` | 10 ordered gate checks |
+| `SignalEngine` | `signals/signal_engine.py` | 10 ordered gate checks + supplemental signal generation |
 | `PositionLedger` | `signals/position_ledger.py` | Tracks whale aggregate position per market (Redis) |
 | `WhitelistManager` | `scoring/whitelist_manager.py` | Maintains scored whale wallet list (Redis + Postgres) |
 | `WhaleScorerService` | `scoring/whale_scorer.py` | Computes composite whale score from Bitquery history |
 | `BitqueryClient` | `data/bitquery_client.py` | On-chain CTF transfer data (Bitquery V2 API) |
-| `PaperTrader` | `simulation/paper_trader.py` | Simulated VWAP fills against live orderbook |
-| `MarketMonitor` | `simulation/market_monitor.py` | Marks open positions to market, triggers stop/TP exits |
+| `PaperTrader` | `simulation/paper_trader.py` | Simulated VWAP fills against live orderbook; strategy-aware |
+| `MarketMonitor` | `simulation/market_monitor.py` | Marks open positions to market, triggers stop/TP/NO_FLIP exits |
 | `RiskGate` | `execution/risk_gate.py` | Circuit breaker, drawdown limits |
 | `CLOBClient` | `data/clob_client.py` | Polymarket CLOB REST API |
 | `GammaClient` | `data/gamma_client.py` | Gamma API — fetches alpha markets for sim mode |
@@ -65,7 +67,8 @@ WebSocket (public market or private user channel)
 - **Postgres** (Railway managed): `signal_events`, `bot_positions`, `bot_orders`,
   `trades`, `wallet_scores`, `daily_pnl_snapshots`
 - **Redis** (Railway managed): `sim:bankroll`, `whale:whitelist` (sorted set),
-  `bot:latency:samples`, `whale:p90_trade_size`, position ledger keys
+  `bot:latency:samples`, `whale:p90_trade_size`, position ledger keys,
+  `pos:{id}:resolution_time` (market resolution time per position, TTL 30 days)
 
 ---
 
@@ -74,27 +77,40 @@ WebSocket (public market or private user channel)
 Gates are in `signals/signal_engine.py:evaluate()`. First failure short-circuits.
 All rejections are written to `signal_events` for funnel analytics.
 
-| Gate | Label | Condition to pass |
-|---|---|---|
-| 0 | *(SELL → BUY-NO conversion)* | SELL events: convert to equivalent BUY-NO before Gate 1. Drops if paired token can't be found. |
-| 1 | `TRADE_IS_BUY` | Trade side must be BUY after conversion |
-| 2 | `TRADE_SIZE_MIN` | `size_usdc >= MIN_WHALE_TRADE_SIZE` (500 USDC) |
-| 3 | `PRICE_RANGE` | `MIN_ENTRY_PRICE ≤ price ≤ MAX_ENTRY_PRICE` (0.03–0.90) |
-| 4 | `WHALE_SCORE_MIN` | Wallet score ≥ `WHALE_SCORE_FLOOR` (65.0). In sim mode with `MARKET_TRADE`, synthetic score from trade size |
-| 5 | `MARKET_OI_MIN` | Open interest ≥ 150,000 USDC (skipped if OI == 0 — happens in sim without auth) |
-| 6 | `ORDERBOOK_DEPTH` | Sufficient depth for MIN_COPY_SIZE; computed copy size ≥ 50 USDC |
-| 7 | `POSITION_CAP` | Existing market exposure < `MAX_PER_MARKET_EXPOSURE_PCT` (5%) of bankroll |
-| 8 | `TIME_TO_RESOLUTION` | ≥ 1h until market closes |
-| 8b | `MAX_TIME_TO_RESOLUTION` | ≤ `MAX_HOURS_TO_RESOLUTION` (effectively unlimited — 999999h) |
-| 9 | `CIRCUIT_BREAKER` | No active circuit breaker |
-| 10 | `CORRELATED_MARKET` | No open position with >50% keyword overlap (Jaccard similarity) |
+| Gate | Label | Condition to pass | Supplemental if fails |
+|---|---|---|---|
+| 0 | *(SELL → BUY-NO conversion)* | SELL events: convert to equivalent BUY-NO before Gate 1. Drops if paired token can't be found. | — |
+| 1 | `TRADE_IS_BUY` | Trade side must be BUY after conversion | — |
+| 2 | `TRADE_SIZE_MIN` | `size_usdc >= MIN_WHALE_TRADE_SIZE` (500 USDC) | — |
+| 3 | `PRICE_RANGE` | `MIN_ENTRY_PRICE ≤ price ≤ MAX_ENTRY_PRICE` (0.03–0.90) | **NO_FLIP** if whale price > 0.90 (buys opposing NO token) |
+| 4 | `WHALE_SCORE_MIN` | Wallet score ≥ `WHALE_SCORE_FLOOR` (65.0). In sim mode with `MARKET_TRADE`, synthetic score from trade size | — |
+| 5 | `MARKET_OI_MIN` | Open interest ≥ 150,000 USDC (skipped if OI == 0 — happens in sim without auth) | — |
+| 6 | `ORDERBOOK_DEPTH` | Sufficient depth for MIN_COPY_SIZE; computed copy size ≥ 50 USDC | **MICRO** if ≥ $10 depth exists (opens $10–$40 micro-position) |
+| 7 | `POSITION_CAP` | Existing market exposure < `MAX_PER_MARKET_EXPOSURE_PCT` (5%) of bankroll | — |
+| 8 | `TIME_TO_RESOLUTION` | ≥ 1h until market closes | — |
+| 8b | `MAX_TIME_TO_RESOLUTION` | ≤ `MAX_HOURS_TO_RESOLUTION` (effectively unlimited — 999999h) | — |
+| 9 | `CIRCUIT_BREAKER` | No active circuit breaker | — |
+| 10 | `CORRELATED_MARKET` | No open position with >50% keyword overlap (Jaccard similarity) | — |
 
 After all gates pass, `PaperTrader` has two more checks:
-- `DUPLICATE_POSITION` — already holding this token
+- `DUPLICATE_POSITION` — COPY: already holding any position in this market; MICRO/NO_FLIP: already holding same-strategy position
 - `PRICE_ASSERTION_FAILED` — live orderbook VWAP fill price not in `[MIN_ENTRY_PRICE, SIM_FILL_PRICE_MAX]` (0.03–0.97)
 - `INSUFFICIENT_CASH` — bankroll too low
 
-### Copy sizing formula
+### Strategies
+
+Three concurrent strategies run from the same signal feed:
+
+| Strategy | Trigger | Size | Key exit conditions |
+|---|---|---|---|
+| **COPY** | Primary signal passes all 10 gates | `tier_pct × bankroll × confidence` (~$50–$200) | SIM_STOP_LOSS_PCT (−30%), SIM_TAKE_PROFIT_PCT (+50%) |
+| **MICRO** | Gate 6 fails but ≥$10 depth exists | Fixed $10–$40 | Same stop/take-profit as COPY |
+| **NO_FLIP** | Gate 3 fails because whale price > 0.90 | Fixed `NO_FLIP_POSITION_SIZE_USDC` | NO_FLIP_TAKE_PROFIT_PCT (+50%), NO_FLIP_STOP_LOSS_PRICE ($0.02 absolute), YES price reversion below NO_FLIP_YES_REVERSION_THRESHOLD (0.80) |
+
+MICRO/NO_FLIP are dispatched as `asyncio.create_task` from `_process_supplemental_signal()`
+in `main.py` — they fire after the primary pipeline returns without blocking it.
+
+### Copy sizing formula (COPY strategy)
 
 ```
 tier_pct     = TIER_PCT lookup(whale_score)  # 0.5%–2% of bankroll
@@ -173,11 +189,19 @@ All values come from environment variables (Railway env vars or `.env` file).
 | `SIM_FILL_PRICE_MAX` | 0.97 | Paper trader upper bound (wider than MAX_ENTRY_PRICE) |
 | `MAX_HOURS_TO_RESOLUTION` | 999999 | Effectively unlimited |
 | `WHALE_SCORE_FLOOR` | 65.0 | Minimum score to trade |
-| `MIN_COPY_SIZE` | 50 USDC | Minimum position size |
+| `MIN_COPY_SIZE` | 50 USDC | Minimum COPY position size |
 | `MAX_PER_MARKET_EXPOSURE_PCT` | 5% | Max bankroll per market |
 | `MAX_DRAWDOWN_PCT` | 15% | Circuit breaker trigger |
-| `SIM_STOP_LOSS_PCT` | 30% | Auto-close on loss |
-| `SIM_TAKE_PROFIT_PCT` | 50% | Auto-close on gain |
+| `SIM_STOP_LOSS_PCT` | 30% | COPY/MICRO auto-close on loss |
+| `SIM_TAKE_PROFIT_PCT` | 50% | COPY/MICRO auto-close on gain |
+| `SIM_MARK_INTERVAL_MINUTES` | 2 | Mark-to-market cadence (was 15) |
+| `SIM_FAST_CHECK_INTERVAL_SECONDS` | 60 | Fast exit check cadence for volatile + NO_FLIP positions |
+| `MICRO_MIN_DEPTH_USDC` | 10 | Min orderbook depth to trigger a MICRO position |
+| `MICRO_POSITION_SIZE_USDC` | 20 | Fixed MICRO position size |
+| `NO_FLIP_POSITION_SIZE_USDC` | 20 | Fixed NO_FLIP position size |
+| `NO_FLIP_TAKE_PROFIT_PCT` | 50% | NO token take-profit threshold |
+| `NO_FLIP_STOP_LOSS_PRICE` | 0.02 | Absolute NO price floor (stop loss) |
+| `NO_FLIP_YES_REVERSION_THRESHOLD` | 0.80 | YES price below which we exit (mean reversion signal) |
 
 ---
 
@@ -186,7 +210,9 @@ All values come from environment variables (Railway env vars or `.env` file).
 | Job | Schedule | What it does |
 |---|---|---|
 | Whitelist refresh | 02:00 UTC daily | Re-discover and re-score whale wallets |
-| Sim mark-to-market | Every 15 min | Update `current_price` on open positions |
+| Sim fast exit check | Every 60s | Re-price volatile positions (|pnl_pct| ≥ 10%) and all NO_FLIP positions; triggers exits |
+| Sim mark-to-market | Every 2 min | Update `current_price` + unrealized P&L on all open positions |
+| Sim resolution check | Every 5 min | Auto-close positions in resolved markets |
 | Sim performance report | Every 6h | Send P&L summary to Telegram |
 | Sim daily snapshot | 23:55 UTC daily | Persist daily P&L snapshot to DB |
 
@@ -198,11 +224,16 @@ FastAPI app served on `PORT` (default 8080). Dashboard at `/`.
 
 Key API endpoints:
 - `GET /api/status` — bankroll, position count, whitelist count, latency
-- `GET /api/metrics` — P&L, win rate, daily returns
-- `GET /api/positions` — open positions
-- `GET /api/funnel` — signal gate rejection breakdown
+- `GET /api/metrics` — aggregate P&L, win rate
+- `GET /api/positions` — all positions (flat list)
+- `GET /api/positions/by-strategy?limit=100` — positions grouped by COPY/MICRO/NO_FLIP with per-strategy stats. **Open positions have current_price refreshed live from the CLOB orderbook on each call.**
+- `GET /api/signals/funnel` — gate rejection breakdown
 - `GET /api/whitelist?limit=20` — whale leaderboard data
-- `GET /api/tiers` — performance broken down by score tier
+- `GET /api/tier_breakdown` — performance broken down by score tier
+- `GET /api/snapshots?days=30` — daily P&L snapshots for chart
+
+Dashboard tables show: Market, Tier, Size, Entry, Current (live for open), P&L ($), P&L (%),
+Status, Whale wallet (truncated), Time to Resolution, Opened. NO_FLIP table also shows Exit Reason.
 
 **Analysis script**: `python scripts/analyze_results.py --url https://polytest-production.up.railway.app/`
 Prints a funnel breakdown of all signal rejections with counts and percentages.
@@ -230,7 +261,7 @@ Required Railway environment variables:
 
 ## Current issues and recent fixes
 
-### Fixed this session
+### Fixed across sessions
 
 | Issue | Root cause | Fix |
 |---|---|---|
@@ -240,6 +271,9 @@ Required Railway environment variables:
 | 5% of signals killed by `MAX_TIME_TO_RESOLUTION` | Cap was 90 days (2160h) | Set to 999999 (unlimited) |
 | Bitquery returning no data | Key prefix `ory_at_` is V2 OAuth; code used V1 endpoint + `X-API-KEY` auth | Migrated entire client to V2 endpoint, Bearer auth, V2 GraphQL schema |
 | Whale leaderboard blank on startup | Whitelist empty at startup (discovery bug + cold DB) | Fixed leaderboard API `window` param from `"monthly"` (invalid) to `"1m"`; improved dashboard message |
+| Very few trades (0.005% pass rate) | Most signals killed at Gate 3/6 — no path for markets with thin books or overbought whales | Added MICRO strategy (Gate 6 fallback) and NO_FLIP strategy (Gate 3 fallback with mean-reversion exits) |
+| Dashboard showed single mixed position table | Strategies COPY/MICRO/NO_FLIP have different characteristics | Split into three separate per-strategy tables with individual P&L, win rate, deployed capital |
+| Current price stale between 2-min mark cycles | Dashboard read cached DB price on every refresh | `/api/positions/by-strategy` now fetches live CLOB mid-prices for all OPEN positions on each request |
 
 ### Known open issues
 
@@ -255,13 +289,8 @@ each CTF transfer with a USDC transfer in the same transaction (secondary query)
 affects whale scorer accuracy but not real-time signal evaluation (which uses live
 orderbook data).
 
-**Paper trader fill assertion direction** (`simulation/paper_trader.py`): added
-`TOO_HIGH/TOO_LOW` direction logging to the `PRICE_ASSERTION_FAILED` warning. After
-the threshold widening deploy, monitor logs to confirm `PRICE_ASSERTION_FAILED` rate
-drops. If still failing `TOO_HIGH`, the market has illiquid orderbooks; if `TOO_LOW`,
-whales are buying near-certain outcomes.
-
 **Sim mode whitelist irrelevance**: In simulation mode all trades arrive as
 `MARKET_TRADE` (public channel, no wallet identity), so the whitelist doesn't affect
 trade generation. Whitelist matters only when switching to live mode. The leaderboard
 panel on the dashboard will populate once Bitquery V2 discovery runs successfully.
+The "Whale" column in position tables will show "MARKET_T…ADE" in sim mode.
